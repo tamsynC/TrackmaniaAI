@@ -1,0 +1,9 @@
+# Trackmania
+
+# Openplanet
+    https://openplanet.dev/download/next
+    press F3 to open on game launch
+
+# Keyboard
+    pip install keyboard
+
