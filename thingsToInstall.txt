@@ -7,3 +7,25 @@
 # Keyboard
     pip install keyboard
 
+ # PyGetWindow
+    pip install PyGetWindow
+
+# MSS
+    pip install MSS
+
+# Torch
+    pip install torch
+
+# Torchvision
+    pip install torchvision
+
+# MatPlotLib
+    pip install MatPlotLib
+
+pip install segmentation_models_pytorch
+
+pip install pycocotools
+
+
+Use python not python3 to run as an admin
+
