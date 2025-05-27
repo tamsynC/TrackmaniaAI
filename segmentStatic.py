@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from torchvision import transforms
 
 # Configuration
-MODEL_PATH = 'unet_model.pth'   # Path to the trained model
+MODEL_PATH = 'C:/Users/tamsy/Documents/TrackmaniaAI/unet_model.pth'   # Path to the trained model
 NUM_CLASSES = 5                  # Number of classes used during training
 CLASS_COLORS = np.array([
     [125, 0, 125],    # background

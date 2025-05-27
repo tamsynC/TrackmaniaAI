@@ -17,7 +17,7 @@ ANN_FILE = 'Trackmania_Coco_Segmentation/train/_annotations.coco.json'
 # print(f"Number of classes: {len(cat_ids)}, Category IDs: {cat_ids}")
 
 NUM_CLASSES = 4 + 1  # Replace with the number of classes in your dataset
-SAVE_PATH = 'unet_model.pth'  # Path to save the trained model
+SAVE_PATH = 'unet_model_v2.pth'  # Path to save the trained model
 
 # Dataset class
 class COCOSegmentationDataset(Dataset):
@@ -67,7 +67,7 @@ if __name__ == "__main__":
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
-    num_epochs = 20
+    num_epochs = 50
 
     for epoch in range(num_epochs):
         model.train()
