@@ -7,10 +7,16 @@ import win32gui
 from torchvision import transforms
 import time
 
+import keyboard
+import random
+
 # ===== CONFIGURATION =====
 MODEL_PATH = 'unet_model.pth'
 NUM_CLASSES = 5
 INPUT_SIZE = (512, 512)  # Resize input to this resolution
+
+ACTIONS = ['a', 'd', 'w', 's']
+ACTION_WEIGHTS = [0.5, 0.5, 0.95, 0.1]  # Probabilities for pressing each key
 
 # Class IDs (must match training)
 LABEL_BACKGROUND = 0
@@ -71,6 +77,17 @@ def overlay_mask(image, mask):
     color_mask = CLASS_COLORS[mask]
     overlayed = cv2.addWeighted(image, 0.6, color_mask, 0.4, 0)
     return overlayed
+
+def overlay_mask_solid(image, mask):
+    # Create blank canvas with same shape as image
+    solid_mask = np.zeros_like(image, dtype=np.uint8)
+    
+    # Paint solid colors where each class is detected
+    for class_id, color in enumerate(CLASS_COLORS):
+        solid_mask[mask == class_id] = color
+    
+    return solid_mask
+
 
 # ===== Utility: Bounding Box Detection =====
 def get_bbox(binary_mask):
@@ -139,6 +156,94 @@ def detect_events(mask, vis_image):
 
 
 
+
+
+def random_action():
+    pressed = []
+    for i, key in enumerate(ACTIONS):
+        if random.random() <= ACTION_WEIGHTS[i]:
+            keyboard.press(key)
+            pressed.append(key)
+        else:
+            keyboard.release(key)
+    return pressed
+
+def release_all_keys():
+    for key in ACTIONS:
+        keyboard.release(key)
+
+def watch_trackmania(model):
+    monitor = find_trackmania_window()
+    print(f"🎮 Watching Trackmania window at: {monitor}")
+    
+    cumulative_reward = 0
+    start_time = time.time()
+    run_duration = 45  # 2 minutes
+
+    with mss.mss() as sct:
+        try:
+            while True:
+                # Reset run if over time
+                if time.time() - start_time > run_duration:
+                    print("🔄 Run timeout, resetting...")
+                    release_all_keys()
+                    cumulative_reward = 0
+                    start_time = time.time()
+                    # keyboard.press_and_release('delete')  # Reset run
+                    keyboard.press('delete')
+                    time.sleep(0.5)
+                    keyboard.release('delete')
+                    time.sleep(3)
+                    continue
+
+                # Take random action
+                pressed_keys = random_action()
+                print(f"Pressed: {pressed_keys}")
+
+                # Capture screen and segment
+                sct_img = sct.grab(monitor)
+                frame = np.array(sct_img)[..., :3]
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                mask, resized_frame = segment_frame(model, frame)
+                vis = overlay_mask_solid(resized_frame, mask)
+                events = detect_events(mask, vis)
+
+                # Handle rewards
+                reward = 0
+                for event in events:
+                    if "Checkpoint crossed" in event:
+                        reward += 10
+                    if "out of bounds" in event:
+                        reward -= 5
+
+                cumulative_reward += reward
+                print(f"🎯 Reward this step: {reward} | Total: {cumulative_reward}")
+
+                # Display segmentation
+                cv2.imshow("Trackmania Live Segmentation", cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
+                time.sleep(1 / 30.0)  # 30 FPS action loop
+
+        except KeyboardInterrupt:
+            print("🛑 Monitoring stopped.")
+        finally:
+            release_all_keys()
+            cv2.destroyAllWindows()
+
+# ===== Entry Point =====
+if __name__ == '__main__':
+    print("🔧 Loading model...")
+    model = load_model(MODEL_PATH)
+    print("👀 Starting live segmentation...")
+    watch_trackmania(model)
+
+
+
+    
+
 # # ===== Event Detection =====
 # def detect_events(mask, vis_image):
 #     car_mask = (mask == LABEL_CAR)
@@ -171,33 +276,26 @@ def detect_events(mask, vis_image):
 #     return events
 
 # ===== Main Loop =====
-def watch_trackmania(model):
-    monitor = find_trackmania_window()
-    print(f"🎮 Watching Trackmania window at: {monitor}")
-    with mss.mss() as sct:
-        try:
-            while True:
-                sct_img = sct.grab(monitor)
-                frame = np.array(sct_img)[..., :3]
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+# def watch_trackmania(model):
+#     monitor = find_trackmania_window()
+#     print(f"🎮 Watching Trackmania window at: {monitor}")
+#     with mss.mss() as sct:
+#         try:
+#             while True:
+#                 sct_img = sct.grab(monitor)
+#                 frame = np.array(sct_img)[..., :3]
+#                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                mask, resized_frame = segment_frame(model, frame)
-                vis = overlay_mask(resized_frame, mask)
-                events = detect_events(mask, vis)
+#                 mask, resized_frame = segment_frame(model, frame)
+#                 vis = overlay_mask_solid(resized_frame, mask)
+#                 events = detect_events(mask, vis)
 
-                if events:
-                    print("EVENTS:", "; ".join(events))
+#                 if events:
+#                     print("EVENTS:", "; ".join(events))
 
-                cv2.imshow("Trackmania Live Segmentation", cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-        except KeyboardInterrupt:
-            print("🛑 Monitoring stopped.")
-        cv2.destroyAllWindows()
-
-# ===== Entry Point =====
-if __name__ == '__main__':
-    print("🔧 Loading model...")
-    model = load_model(MODEL_PATH)
-    print("👀 Starting live segmentation...")
-    watch_trackmania(model)
+#                 cv2.imshow("Trackmania Live Segmentation", cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+#                 if cv2.waitKey(1) & 0xFF == ord('q'):
+#                     break
+#         except KeyboardInterrupt:
+#             print("🛑 Monitoring stopped.")
+#         cv2.destroyAllWindows()
