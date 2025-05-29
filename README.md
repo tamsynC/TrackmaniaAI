@@ -14,8 +14,11 @@ Group number:
 
 Group composition:
 Jet Webb: 24502825
+
 Tamsyn Crangle: 24439287
+
 Nicolas Yao: 24563633
+
 Connor Williams: 24459594
 
 ## Install info
