@@ -574,7 +574,7 @@ def main():
     seg_model = load_segmentation_model(MODEL_PATH)
 
     q_net = QNetwork((3, INPUT_SIZE[1], INPUT_SIZE[0]), NUM_ACTIONS)
-    q_net.load_state_dict(torch.load("trackmania_dqn_final_nobrakes.pth", map_location=torch.device('cuda')))
+    q_net.load_state_dict(torch.load("trackmania_dqn_final.pth", map_location=torch.device('cuda')))
     q_net.eval()
 
     optimizer = optim.Adam(q_net.parameters(), lr=LEARNING_RATE)
