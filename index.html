@@ -120,8 +120,30 @@
             class="teaser-image"
             alt="Teaser."/>
       <h2 class="subtitle has-text-centered">
-        <span class="dnerf">41118 Portfolio teaser</span> sample of teaser image for your project. Note that this image is AI generated and does not reflect any flowchart of an actual framework. However, this text would be a great place to give a quick summary of your own flowchart.
+		Trackmania AI Flowchart
       </h2>
+	  <p>
+		This flowchart illustrates a reinforcement learning pipeline designed for a <strong>Trackmania AI agent</strong> that drives autonomously using visual input. The system is composed of four main components:
+	  </p>
+
+	  <ol style="padding-left: 1.5em; list-style-position: inside;"><br>
+		<li>
+		  <strong>Game Frame Input:</strong> A frame from the Trackmania simulation is captured, showing the car and the track environment.
+		</li>
+		<li>
+		  <strong>CNN (Segmentation):</strong> This frame is passed into a <em>Convolutional Neural Network</em> trained for image segmentation. The CNN outputs a segmentation mask that highlights key visual features of the track such as road boundaries, curbs, and off-track areas.
+		</li>
+		<li>
+		  <strong>DQN (Driving Policy):</strong> The segmentation mask is then fed into a <em>Deep Q-Network</em> (DQN), which uses it to determine the optimal driving action. The DQN is trained using reinforcement learning to maximize performance based on rewards.
+		</li>
+		<li>
+		  <strong>Trackmania Simulation/Game Engine:</strong> The selected action is executed in the game engine, moving the car and generating a new frame along with a reward signal based on the car’s behavior (e.g., staying on track, speed, lap time). This reward feeds back into the DQN to improve decision-making.
+		</li>
+	  </ol>
+
+	  <p><br>
+		The loop continues with the next frame captured from the game, completing the feedback cycle of <strong>perception</strong>, <strong>decision-making</strong>, and <strong>learning</strong>. This process enables the AI to learn and improve its driving policy over time through interaction with the environment.
+	  </p>
     </div>
   </div>
 </section>
@@ -166,11 +188,8 @@
         <h2 class="title is-3">Abstract</h2>
         <div class="content has-text-justified">
           <p>
-            Description of the project. This is a sample text to show how the abstract would look like in your own project. You can use this space to describe the main idea of your project, the methods used, and the results obtained.
-          </p>
+			This project focuses on developing an autonomous driving agent for Trackmania 2020 using reinforcement learning. The goal is to train an AI to complete tracks as quickly and efficiently as possible without human input. The system uses a Convolutional Neural Network (CNN) for real-time image segmentation of the game environment and a Deep Q-Network (DQN) to make driving decisions based on visual input. Through continuous interaction with the game, the AI learns to improve its lap times by optimizing its control strategy and navigating the track with increasing precision.          </p>
           <p>
-            Orem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-          </p>
           <p>
             The video below explain how to set up your portfolio.
           </p>
@@ -192,9 +211,7 @@
                   frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>
         </div>
         -->
-        <p>
-          Directly embedded video:
-        </p>
+
         <div class="content has-text-centered">
           <video id="replay-video"
                   controls
@@ -262,9 +279,7 @@
           <p>
             This is a sample text to show how the results discussion and reflection would look like in your own project. You can use this space to describe the main results obtained, the limitations of your work, and the future work that could be done.
           </p>
-          <p>
-            Orem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
-          </p>
+
         </div>
       </div>
     </div>
