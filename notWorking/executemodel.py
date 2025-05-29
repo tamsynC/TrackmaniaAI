@@ -143,7 +143,7 @@ def get_window_bbox(title):
 
 def main():
     model = SimpleCNN()
-    model.load_state_dict(torch.load("model_behavioral_cloning_finalv2.pth"))
+    model.load_state_dict(torch.load("trackmani_dqn_final.pth"))
     model.eval()
 
     transform = transforms.Compose([
@@ -156,7 +156,8 @@ def main():
         return
 
     with mss.mss() as sct:
-        while True:
+        i = 0
+        while i < 10:
             img = np.array(sct.grab(bbox))
             frame = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
             input_tensor = transform(Image.fromarray(frame)).unsqueeze(0)

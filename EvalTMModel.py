@@ -351,8 +351,6 @@ import cv2
 import mss
 import win32gui
 from torchvision import transforms
-import torchvision.transforms as T
-from torchmetrics.functional import structural_similarity_index_measure as ssim
 import time
 import random
 from collections import deque
@@ -367,7 +365,7 @@ INPUT_SIZE = (512, 512)
 
 ACTIONS = ['a', 'd', 'w', 's']
 ACTION_INDEX = [0, 1, 2, 3]
-ACTION_WEIGHTS = [0.1, 0.1, 1, 0]
+ACTION_WEIGHTS = [0.15, 0.15, 0.9, 0.025]
 ACTION_WEIGHTS_NORMALISED = [0.125, 0.125, 0.7, 0.05]
 NUM_ACTIONS = len(ACTIONS)
 
@@ -385,9 +383,7 @@ REPLAY_BUFFER_CAPACITY = 10000
 TARGET_UPDATE_FREQ = 1000
 EPSILON_START = 1.0
 EPSILON_END = 0.05
-EPSILON_DECAY = 20000
-
-
+EPSILON_DECAY = 5000
 
 # ===== LOAD SEGMENTATION MODEL =====
 def load_segmentation_model(path):
@@ -440,26 +436,7 @@ def boxes_overlap(a, b):
     bx1, by1, bx2, by2 = b
     return ax1 < bx2 and ax2 > bx1 and ay1 < by2 and ay2 > by1
 
-def frames_same(f1, f2, threshold=0.95):
-    if f1.shape != f2.shape:
-        return False
-
-    # Convert OpenCV (HWC, BGR) to PyTorch tensor (1, C, H, W), normalized to [0, 1]
-    transform = T.Compose([
-        T.ToTensor()  # Converts to range [0, 1] and (C, H, W)
-    ])
-
-    t1 = transform(f1).unsqueeze(0)
-    t2 = transform(f2).unsqueeze(0)
-
-    # Compute SSIM (returns 1.0 for identical images)
-    score = ssim(t1, t2)
-
-    #print("Similarity score: ", score)
-
-    return score >= threshold
-
-def detect_events(mask, f1, f2):
+def detect_events(mask):
     car_mask = (mask == LABEL_CAR)
     track_mask = (mask == LABEL_TRACK)
     checkpoint_mask = (mask == LABEL_CHECKPOINT)
@@ -481,9 +458,6 @@ def detect_events(mask, f1, f2):
             events.append("checkpoint")
             break
 
-    if frames_same(f1, f2):
-        events.append("crash")
-
     return events
 
 def reward_from_events(events, episode_length, max_episode_length):
@@ -491,8 +465,6 @@ def reward_from_events(events, episode_length, max_episode_length):
     if "checkpoint" in events:
         reward += int(100 * round(1- float(episode_length/max_episode_length), 2))
     if "out_of_bounds" in events:
-        reward -= 500
-    if "crash" in events:
         reward -= 500
     return reward
 
@@ -602,9 +574,8 @@ def main():
     seg_model = load_segmentation_model(MODEL_PATH)
 
     q_net = QNetwork((3, INPUT_SIZE[1], INPUT_SIZE[0]), NUM_ACTIONS)
-    target_net = QNetwork((3, INPUT_SIZE[1], INPUT_SIZE[0]), NUM_ACTIONS)
-    target_net.load_state_dict(q_net.state_dict())
-    target_net.eval()
+    q_net.load_state_dict(torch.load("trackmania_dqn_final_nobrakes.pth", map_location=torch.device('cuda')))
+    q_net.eval()
 
     optimizer = optim.Adam(q_net.parameters(), lr=LEARNING_RATE)
     replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
@@ -616,16 +587,15 @@ def main():
     monitor = find_trackmania_window()
     print(f"🎮 Capturing Trackmania window at: {monitor}")
 
-    max_episode_length = 60
-    total_episodes = 50
+    max_episode_length = 100
+    total_episodes = 60
 
     with mss.mss() as sct:
         try:
-            for episode in range(total_episodes):
-                episode_reward = 0
+            for episode in range(10):  # evaluate 10 times
+                total_reward = 0
                 episode_length = 0
-
-                print(f"\n🚗 Starting Episode {episode + 1}/{total_episodes}")
+                print(f"\n🎮 Evaluating Episode {episode + 1}/10")
 
                 while episode_length < max_episode_length:
                     sct_img = sct.grab(monitor)
@@ -634,53 +604,34 @@ def main():
 
                     mask, resized_frame = segment_frame(seg_model, frame)
                     state = preprocess_frame(resized_frame)
-                    
-                    action_idx = []
-                    if random.random() < epsilon:
-                        # Choose random combination of keys (e.g. w + a, or d only, etc.)
-                        for item in ACTION_WEIGHTS:
-                            if random.random() <= item:
-                                action_idx.append(1)
-                            else:
-                                action_idx.append(0)
 
-                    else:
-                        state_t = torch.FloatTensor(state).unsqueeze(0)
-                        with torch.no_grad():
-                            q_values = q_net(state_t)
-                            probs = torch.sigmoid(q_values.squeeze())  # interpret outputs as independent actions
-                            action_idx = [1 if p > 0.5 else 0 for p in probs.tolist()]
+                    state_t = torch.FloatTensor(state).unsqueeze(0)
+                    with torch.no_grad():
+                        q_values = q_net(state_t)
+                        probs = torch.sigmoid(q_values.squeeze())
+                        action_idx = [1 if p > 0.5 else 0 for p in probs.tolist()]
+
+                    if action_idx[3] == 1:
+                        action_idx = [action_idx[0], action_idx[1], 0, action_idx[3]]
 
                     press_action(action_idx)
-                    #print(action_idx)
                     time.sleep(1 / 30)
 
+                    # Observe next state and reward
                     sct_img_next = sct.grab(monitor)
                     frame_next = np.array(sct_img_next)[..., :3]
                     frame_next = cv2.cvtColor(frame_next, cv2.COLOR_BGR2RGB)
-
                     mask_next, resized_frame_next = segment_frame(seg_model, frame_next)
-                    next_state = preprocess_frame(resized_frame_next)
 
-                    events = detect_events(mask_next, frame, frame_next)
+                    events = detect_events(mask_next)
                     reward = reward_from_events(events, episode_length, max_episode_length)
                     done = episode_length + 1 >= max_episode_length
 
-                    episode_reward += reward
-                    replay_buffer.push(state, action_idx, reward, next_state, done)
-                    train_step(q_net, target_net, optimizer, replay_buffer)
-
-                    if step_idx % TARGET_UPDATE_FREQ == 0:
-                        target_net.load_state_dict(q_net.state_dict())
-
-                    if epsilon > EPSILON_END:
-                        epsilon -= epsilon_decay_step
-
-                    step_idx += 1
+                    total_reward += reward
                     episode_length += 1
 
                     if done:
-                        print(f"✅ Episode {episode + 1} finished. Reward: {episode_reward:.2f}")
+                        print(f"✅ Evaluation Episode {episode+1} finished. Total reward: {total_reward}")
                         keyboard.press_and_release('escape')
                         time.sleep(0.1)
                         keyboard.press_and_release('enter')
@@ -688,16 +639,10 @@ def main():
                         keyboard.press_and_release('m')
                         release_all_keys()
                         break
-
-            print("🎉 Training complete after 100 episodes.")
-            torch.save(q_net.state_dict(), "trackmania_dqn_final_nobrakes.pth")
-            print("💾 Q-network saved to trackmania_dqn_final_nobrakes.pth")
-
         except KeyboardInterrupt:
-            print("🛑 Training interrupted by user.")
+            print("🛑 Evaluation interrupted.")
         finally:
             release_all_keys()
-            torch.save(q_net.state_dict(), "trackmania_dqn_final_nobrakes.pth")
             cv2.destroyAllWindows()
 
 if __name__ == "__main__":
