@@ -1,18 +1,14 @@
 # TrackmaniaAI
 
 ## Resources
-- To edit your README file, follow these [markdown instructions](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax).
-- This video explains how to set up a GitHub page that you can use as a portfolio. The page is an edited version of the [nerfies](https://github.com/nerfies/nerfies.github.io) website.
-- Alternatively, you can use a Jekyll theme for your project page ([see documentation here](https://docs.github.com/en/pages/setting-up-a-github-pages-site-with-jekyll/adding-a-theme-to-your-github-pages-site-using-jekyll)).
 
-Below, I give an example of the minimal information required in your README file:
 
-Short explanation of your project
+
 
 ## Group information
-Group number: 
+Group 5: Trackmania
 
-Group composition:
+## Group composition:
 Jet Webb: 24502825
 
 Tamsyn Crangle: 24439287
@@ -22,13 +18,16 @@ Nicolas Yao: 24563633
 Connor Williams: 24459594
 
 ## Install info
-Define here the dependencies for your project
-```bash
-pip install numpy pytorch
-```
+Dependencies
+Use pip install -r thingsToInstall.txt to install dependencies.
+Trackmania 2020 with the following settings:
+![image](https://github.com/user-attachments/assets/c90e8cd6-a327-40e7-956b-91a1ab6d9471)
+
+Adjust the give up key bind to be Backspace.
+Download the track BasicAIMapV5.Gbx map and put it in the folder Documents\Trackmania\Maps\Downloaded. This will allow you to open the track under local play a track, downloaded.
 
 ## Run commands
-Explanation of how to run your code and what is expected to happen
+Training:
 ```bash
-python test.py
+python JetsModelV2 (2).py
 ```
