@@ -27,7 +27,17 @@ Adjust the give up key bind to be Backspace.
 Download the track BasicAIMapV5.Gbx map and put it in the folder Documents\Trackmania\Maps\Downloaded. This will allow you to open the track under local play a track, downloaded.
 
 ## Run commands
+
 Training:
-```bash
+1.	Open the Trackmania map.
+2. ```bash
 python JetsModelV2 (2).py
 ```
+3.	Click on the Trackmania window, the model will then train.
+
+
+![image](https://github.com/user-attachments/assets/32af277e-dcd4-4146-9be8-85c9705e3bf6)
+Running the Code
+1.	Open the Trackmania map.
+2.	Run python EvalTMModel.py
+3.	Click on the Trackmania window, the model will then run.
