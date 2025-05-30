@@ -15,6 +15,8 @@ import random
 from collections import deque
 import threading
 from queue import Queue, Empty
+import os
+import shutil
 
 import keyboard
 import segmentation_models_pytorch as smp
@@ -25,7 +27,7 @@ INPUT_SIZE = (512, 512)
 
 ACTIONS = ['a', 'd', 'w', 's']
 ACTION_INDEX = [0, 1, 2, 3]
-ACTION_WEIGHTS = [0.3, 0.3, 0.8, 0.1]
+ACTION_WEIGHTS = [0.25, 0.25, 0.9, 0.1]
 ACTION_WEIGHTS_NORMALISED = [0.25, 0.25, 0.45, 0.05]
 NUM_ACTIONS = len(ACTIONS)
 
@@ -36,27 +38,92 @@ LABEL_CHECKPOINT = 2
 LABEL_FINISH = 3
 
 # Optimized parameters to reduce computational load
-BATCH_SIZE = 32  # Reduced for less GPU memory usage
+BATCH_SIZE = 64  # Reduced for less GPU memory usage
 GAMMA = 0.99
-LEARNING_RATE = 5e-4
-REPLAY_BUFFER_CAPACITY = 25000  # Reduced buffer size
-TARGET_UPDATE_FREQ = 1000  # Less frequent updates
+LEARNING_RATE = 1e-4
+REPLAY_BUFFER_CAPACITY = 100000    # Reduced buffer size
+TARGET_UPDATE_FREQ = 50  # Less frequent updates
 EPSILON_START = 1.0
-EPSILON_END = 0.1
-EPSILON_DECAY = 15000
+EPSILON_END = 0.05
+EPSILON_DECAY = 5000 #change to 50000
 
 # Performance optimizations
-EPISODE_TIMEOUT = 120
-CRASH_THRESHOLD = 0.85
+EPISODE_TIMEOUT = 60
+CRASH_THRESHOLD = 0.87
 STUCK_THRESHOLD = 15
-CHECKPOINT_CONFIRM_FRAMES = 20
+CHECKPOINT_CONFIRM_FRAMES = 60
 FINISH_CONFIRM_FRAMES = 300  # 5 seconds at 60 FPS
 VELOCITY_THRESHOLD = 3
 FRAME_SKIP = 2  # Process every 2nd frame to reduce load
 TRAIN_FREQUENCY = 4  # Train every 4 steps instead of every step
+CHECKPOINT_TIMEOUT = 20  # seconds without checkpoint before penalty
+CHECKPOINT_TIMEOUT_PENALTY = 500000  # Large penalty for not reaching checkpoint in time
+
+
+# DISK SPACE MANAGEMENT
+CHECKPOINT_SAVE_FREQUENCY = 50  # Save less frequently (every 50 episodes instead of 25)
+MAX_CHECKPOINTS_TO_KEEP = 3     # Only keep the 3 most recent checkpoints
+MIN_FREE_SPACE_GB = 1.0         # Minimum free space to maintain (in GB)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
+
+def check_disk_space(path="."):
+    """Check available disk space in GB"""
+    total, used, free = shutil.disk_usage(path)
+    free_gb = free / (1024**3)
+    return free_gb
+
+def cleanup_old_checkpoints(pattern="trackmania_dqn_checkpoint_", keep_count=MAX_CHECKPOINTS_TO_KEEP):
+    """Remove old checkpoint files, keeping only the most recent ones"""
+    checkpoint_files = []
+    for file in os.listdir("."):
+        if file.startswith(pattern) and file.endswith(".pth"):
+            try:
+                # Extract episode number from filename
+                episode_num = int(file.replace(pattern, "").replace(".pth", ""))
+                checkpoint_files.append((episode_num, file))
+            except ValueError:
+                continue
+    
+    # Sort by episode number (newest first)
+    checkpoint_files.sort(reverse=True)
+    
+    # Remove old checkpoints
+    for i, (episode_num, filename) in enumerate(checkpoint_files):
+        if i >= keep_count:
+            try:
+                os.remove(filename)
+                print(f"🗑️ Removed old checkpoint: {filename}")
+            except OSError as e:
+                print(f"⚠️ Could not remove {filename}: {e}")
+
+def safe_save_model(model_state_dict, filename):
+    """Safely save model with disk space checks"""
+    free_space = check_disk_space()
+    
+    if free_space < MIN_FREE_SPACE_GB:
+        print(f"⚠️ Low disk space ({free_space:.2f}GB). Cleaning up old checkpoints...")
+        cleanup_old_checkpoints()
+        
+        # Check again after cleanup
+        free_space = check_disk_space()
+        if free_space < MIN_FREE_SPACE_GB:
+            print(f"❌ Still insufficient disk space ({free_space:.2f}GB). Skipping save.")
+            return False
+    
+    try:
+        torch.save(model_state_dict, filename)
+        print(f"💾 Model saved successfully: {filename}")
+        return True
+    except OSError as e:
+        if "No space left on device" in str(e):
+            print(f"❌ Disk full! Could not save {filename}")
+            cleanup_old_checkpoints()
+            return False
+        else:
+            print(f"❌ Error saving {filename}: {e}")
+            return False
 
 def load_segmentation_model(path):
     model = smp.Unet(
@@ -172,7 +239,62 @@ def calculate_track_direction(mask):
     direction = (right_weight - left_weight) / (left_weight + right_weight)
     return np.clip(direction, -1, 1)
 
-def detect_events(mask, f1, f2, prev_positions, stuck_counter, checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed):
+def calculate_car_speed(current_pos, prev_pos, dt=1/60):
+    """Calculate car speed based on position change"""
+    if current_pos is None or prev_pos is None:
+        return 0
+    
+    distance = np.linalg.norm(np.array(current_pos) - np.array(prev_pos))
+    speed = distance / dt  # pixels per second
+    return speed
+
+def calculate_progress(car_center, checkpoint_mask, finish_mask):
+    """Calculate rough progress through the track"""
+    if car_center is None:
+        return 0
+    
+    # Simple progress calculation based on proximity to checkpoints/finish
+    checkpoint_pixels = np.sum(checkpoint_mask)
+    finish_pixels = np.sum(finish_mask)
+    
+    # This is a simplified progress calculation
+    # In a real implementation, you might want to track lap progress more sophisticatedly
+    progress = (checkpoint_pixels + finish_pixels * 2) / 100  # Normalize
+    return progress
+
+def calculate_action_complexity_penalty(action_idx, prev_action_idx):
+    """Penalize erratic or contradictory actions"""
+    if prev_action_idx is None:
+        return 0
+    
+    # Count action changes
+    changes = sum(1 for i in range(len(action_idx)) if action_idx[i] != prev_action_idx[i])
+    
+    # Penalize simultaneous opposite actions (left+right, forward+backward)
+    penalty = 0
+    if action_idx[0] == 1 and action_idx[1] == 1:  # left + right
+        penalty -= 50
+    if action_idx[2] == 1 and action_idx[3] == 1:  # forward + backward (unlikely but possible)
+        penalty -= 100
+    
+    # Small penalty for too many simultaneous actions
+    simultaneous_actions = sum(action_idx)
+    if simultaneous_actions > 2:
+        penalty -= 20
+    
+    # Penalty for too frequent action changes (jittery behavior)
+    if changes > 2:
+        penalty -= 10
+    
+    return penalty
+
+def check_checkpoint_timeout(last_checkpoint_time, current_time):
+    """Check if too much time has passed since last checkpoint"""
+    if last_checkpoint_time is None:
+        return False
+    return (current_time - last_checkpoint_time) > CHECKPOINT_TIMEOUT
+
+def detect_events(mask, f1, f2, prev_positions, stuck_counter, checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed, last_checkpoint_time, current_time):
     """Optimized event detection"""
     car_mask = (mask == LABEL_CAR)
     track_mask = (mask == LABEL_TRACK)
@@ -195,6 +317,7 @@ def detect_events(mask, f1, f2, prev_positions, stuck_counter, checkpoint_counte
         if checkpoint_counter >= CHECKPOINT_CONFIRM_FRAMES and not checkpoint_confirmed:
             events.append("checkpoint")
             checkpoint_confirmed = True
+            last_checkpoint_time = current_time  # Update last checkpoint time
     else:
         checkpoint_counter = 0
         checkpoint_confirmed = False
@@ -208,6 +331,9 @@ def detect_events(mask, f1, f2, prev_positions, stuck_counter, checkpoint_counte
     else:
         finish_counter = 0
         finish_confirmed = False
+
+    if check_checkpoint_timeout(last_checkpoint_time, current_time):
+        events.append("checkpoint_timeout")
 
     # Simplified crash detection - only check every few frames
     if f1 is not None and f2 is not None and len(prev_positions) % 5 == 0:
@@ -234,26 +360,86 @@ def detect_events(mask, f1, f2, prev_positions, stuck_counter, checkpoint_counte
                 if max(distances) < 8:
                     events.append("stuck")
 
-    return events, stuck_counter + 1 if "stuck" in events else 0, checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed
+    return events, stuck_counter + 1 if "stuck" in events else 0, checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed, last_checkpoint_time
 
-def reward_from_events(events, episode_length, max_episode_length, track_direction):
+def reward_from_events(events, episode_length, max_episode_length, track_direction, car_speed=0, progress_delta=0, consecutive_checkpoints=0):
     reward = 0
     
+    # Major completion rewards
     if "finish" in events:
-        reward += 1000
+        # Massive reward for finishing, with time bonus
+        time_efficiency_bonus = max(0, (max_episode_length - episode_length) / max_episode_length * 500)
+        reward += 1000 + time_efficiency_bonus
+        print(f"🏆 RACE COMPLETED! Time bonus: {time_efficiency_bonus:.1f}")
+    
+
     elif "checkpoint" in events:
-        time_bonus = max(0, 100 - episode_length)
-        reward += 200 + time_bonus
+        # Base checkpoint reward with time bonus
+        time_bonus = max(0, (max_episode_length - episode_length) / max_episode_length * 100)
+        base_checkpoint_reward = 2000 + time_bonus
+        
+        # Consecutive checkpoint bonus (exponential growth)
+        consecutive_bonus = min(consecutive_checkpoints * 200, 1000)  # Cap at 1000
+        reward += base_checkpoint_reward + consecutive_bonus
+        print(f"✅ Checkpoint! Base: {base_checkpoint_reward:.1f}, Consecutive bonus: {consecutive_bonus:.1f}")
+    
+    # Punishment system - scaled by survival time
+    survival_factor = min(1.0, episode_length / 10800)  # 3 min
+    
+    if "crash" in events:
+        # Less punishment for crashes that happen later (learned something)
+        base_crash_penalty = -3000
+        time_adjusted_penalty = base_crash_penalty * (1 - survival_factor * 0.9)  # Up to 70% reduction
+        reward += time_adjusted_penalty
+        print(f"💥 Crash penalty: {time_adjusted_penalty:.1f} (survival factor: {survival_factor:.2f})")
+    
+    if "stuck" in events:
+        # Punishment for getting stuck, less severe if survived longer
+        base_stuck_penalty = -3000
+        time_adjusted_penalty = base_stuck_penalty * (1 - survival_factor * 0.9)  # Up to 50% reduction
+        reward += time_adjusted_penalty
     
     if "out_of_bounds" in events:
-        reward -= 100
-    if "crash" in events:
-        reward -= 200
-    if "stuck" in events:
-        reward -= 50
+        # Punishment for going off track, slightly reduced for longer survival
+        base_oob_penalty = -3000
+        time_adjusted_penalty = base_oob_penalty * (1 - survival_factor * 0.8)  # Up to 30% reduction
+        reward += time_adjusted_penalty
     
-    reward += abs(track_direction) * 2
-    reward += 1
+    # Continuous rewards for good behavior
+    
+    # Time alive reward - encourages survival
+    time_alive_reward = min(episode_length * 0.5, 5000)  # Cap at 50 to prevent exploitation
+    reward += time_alive_reward
+    
+    # Track direction reward - staying on racing line
+    direction_reward = abs(track_direction) * 3
+    reward += direction_reward
+    
+    # Speed reward - encourages forward movement
+    if car_speed > 0:
+        speed_reward = min(car_speed * 2, 20)  # Cap speed reward
+        reward += speed_reward
+    
+    # Progress reward - reward for moving forward through the track
+    if progress_delta > 0:
+        progress_reward = progress_delta * 10
+        reward += progress_reward
+    elif progress_delta < 0:
+        # Small penalty for going backwards
+        reward += progress_delta * 5
+    
+    # Consistency bonus - small reward for each frame without crashing
+    if not any(event in events for event in ["crash", "stuck", "out_of_bounds"]):
+        consistency_bonus = 2
+        reward += consistency_bonus
+    if "checkpoint_timeout" in events:
+        # Large penalty for not reaching checkpoint in time
+        timeout_penalty = CHECKPOINT_TIMEOUT_PENALTY
+        # Make penalty worse if it's been a long time since last checkpoint
+        reward += timeout_penalty       
+        print(f"⏱️ Checkpoint timeout penalty: {CHECKPOINT_TIMEOUT_PENALTY}")
+    # Multi-action penalty to discourage erratic behavior
+    # (This would need to be passed from the main loop)
     
     return reward
 
@@ -285,7 +471,10 @@ class QNetwork(nn.Module):
             nn.Linear(256, num_actions)
         )
 
-
+    def forward(self, x):
+        x = self.conv(x)
+        x = x.view(x.size(0), -1)
+        return self.fc(x)
 
 class ReplayBuffer:
     def __init__(self, capacity):
@@ -361,6 +550,14 @@ def train_step(q_net, target_net, optimizer, replay_buffer):
     optimizer.step()
 
 def main():
+    # Check initial disk space
+    free_space = check_disk_space()
+    print(f"💾 Available disk space: {free_space:.2f}GB")
+    
+    if free_space < MIN_FREE_SPACE_GB * 2:  # Need at least 2GB to start safely
+        print("⚠️ Warning: Low disk space! Consider freeing up space before training.")
+        cleanup_old_checkpoints()
+    
     print("🔧 Loading segmentation model...")
     seg_model = load_segmentation_model(MODEL_PATH)
 
@@ -379,8 +576,9 @@ def main():
     monitor = find_trackmania_window()
     print(f"🎮 Capturing Trackmania window at: {monitor}")
     testingvar = 0
-    total_episodes = 500
+    total_episodes = 1000
     prev_mask = None
+    
     with mss.mss() as sct:
         try:
             for episode in range(total_episodes):
@@ -394,24 +592,26 @@ def main():
                 finish_counter = 0
                 finish_confirmed = False
                 frame_count = 0
-
+                consecutive_checkpoints = 0
+                max_consecutive_checkpoints = 0
                 print(f"\n🚗 Starting Episode {episode + 1}/{total_episodes} (ε={epsilon:.3f})")
 
                 prev_frame = None
+                prev_car_pos = None
+                prev_action_idx = None
+                prev_progress = 0
                 
                 while True:
                     current_time = time.time()
-                    
                     if current_time - episode_start_time > EPISODE_TIMEOUT:
                         print("⏰ Episode timeout - restarting track")
+                        episode_reward = -50000
                         restart_track()
                         break
+                    last_checkpoint_time = time.time()  # Initialize checkpoint timer at episode start
 
                     # Skip frames for performance
                     frame_count += 1
-                    # if frame_count % FRAME_SKIP != 0:
-                    #     time.sleep(1 / 120)  # Still maintain timing
-                    #     continue
 
                     try:
                         sct_img = sct.grab(monitor)
@@ -427,18 +627,20 @@ def main():
                             if state is None or np.isnan(state).any():
                                 raise ValueError("Invalid state after preprocessing")
                         except Exception as e:
-                            # print(f"⚠️ Frame processing error: {e}")
-                            # print("🔄 Restarting track...")
-                            # release_all_keys()
-                            # keyboard.press_and_release('escape')
-                            # time.sleep(0.1)
-                            # keyboard.press_and_release('enter')
-                            # time.sleep(0.1)
-                            # keyboard.press_and_release('m')
                             continue
 
-
                         track_direction = calculate_track_direction(mask)
+                        
+                        # Calculate additional metrics for reward system
+                        car_mask = (mask == LABEL_CAR)
+                        car_center = get_centroid(car_mask)
+                        car_speed = calculate_car_speed(car_center, prev_car_pos) if prev_car_pos else 0
+                        
+                        # Calculate progress (simplified)
+                        checkpoint_mask = (mask == LABEL_CHECKPOINT)
+                        finish_mask = (mask == LABEL_FINISH)
+                        current_progress = calculate_progress(car_center, checkpoint_mask, finish_mask)
+                        progress_delta = current_progress - prev_progress
                         
                         # Action selection
                         if random.random() < epsilon:
@@ -458,6 +660,9 @@ def main():
                                 q_values = q_net(state_t)
                                 probs = torch.sigmoid(q_values.squeeze())
                                 action_idx = [1 if p > 0.5 else 0 for p in probs.tolist()]
+                        
+                        # Calculate action complexity penalty
+                        action_penalty = calculate_action_complexity_penalty(action_idx, prev_action_idx)
 
                         press_action(action_idx)
 
@@ -475,48 +680,38 @@ def main():
                             if next_state is None or np.isnan(next_state).any():
                                 raise ValueError("Invalid next_state after preprocessing")
                         except Exception as e:
-                            # print("Frame shape:", frame.shape)
-                            # print("Resized frame shape:", resized_frame.shape if resized_frame is not None else "None")
-
-                            # print(f"⚠️ Frame processing error (next): {e}")
-                            # print("🔄 Restarting track...")
-                            # release_all_keys()
-                            # keyboard.press_and_release('escape')
-                            # time.sleep(0.1)
-                            # keyboard.press_and_release('enter')
-                            # time.sleep(0.1)
-                            # keyboard.press_and_release('m')
-                            continue  # optionally restart episode instead of quitting
+                            continue
+                        
                         done = False
 
-                        mask_next, resized_frame_next = segment_frame(seg_model, frame_next, use_cache=True)
                         # After you calculate mask_next:
                         if prev_mask is not None:
                             similarity = np.mean(prev_mask == mask_next)
-                            # print(similarity)
                             if similarity < 0.98:
                                 testingvar = 0
                             if similarity > 0.98:
                                 testingvar += 1
                                 if testingvar > 6:
-                                    events.append("crash")
+                                    events = ["crash"]
                                     restart_track()
                                     done = True
                                     testingvar = 0
-                                    break  # <-- important to advance to next episode
+                                    break
 
                         prev_mask = mask_next.copy()
 
-                        next_state = preprocess_frame(resized_frame_next)
-
                         # Event detection (less frequent)
                         events = []
-                        if prev_frame is not None and episode_length % 3 == 0:  # Check every 3rd step
-                            events, stuck_counter, checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed = detect_events(
+                        if prev_frame is not None and episode_length % 3 == 0:
+                            events, stuck_counter, checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed, last_checkpoint_time = detect_events(
                                 mask_next, prev_frame, frame_next, prev_positions, stuck_counter, 
-                                checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed)
+                                checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed, last_checkpoint_time, current_time)
 
-                        reward = reward_from_events(events, episode_length, EPISODE_TIMEOUT * 60, track_direction)
+                        reward = reward_from_events(events, episode_length, EPISODE_TIMEOUT * 60, track_direction, car_speed, progress_delta, consecutive_checkpoints)
+
+                        
+                        # Add action complexity penalty
+                        reward += action_penalty
                         
                         # Progress display (less frequent)
                         if finish_counter > 0 and not finish_confirmed and episode_length % 30 == 0:
@@ -530,7 +725,10 @@ def main():
                             print(f"💥 {'Crash' if 'crash' in events else 'Stuck'} - restarting")
                             restart_track()
                             done = True
-                        elif "checkpoint" in events:
+                        if "checkpoint" in events:
+                            consecutive_checkpoints += 1
+                            max_consecutive_checkpoints = max(max_consecutive_checkpoints, consecutive_checkpoints)
+                            last_checkpoint_time = time.time()  # Reset timer when checkpoint is reached
                             print(f"✅ Checkpoint! Reward: {reward:.1f}")
 
                         episode_reward += reward
@@ -543,7 +741,6 @@ def main():
                                 print(f"📍 Events detected: {events}")
 
                             replay_buffer.push(prev_state, action_idx, reward, next_state, done)
-
                             train_step(q_net, target_net, optimizer, replay_buffer)
 
                         if step_idx % TARGET_UPDATE_FREQ == 0:
@@ -556,35 +753,42 @@ def main():
                         step_idx += 1
                         episode_length += 1
                         prev_frame = frame_next.copy()
+                        prev_car_pos = car_center
+                        prev_action_idx = action_idx.copy()
+                        prev_progress = current_progress
 
                         if done:
+                            last_checkpoint_time = time.time()  # Reset checkpoint timer for new episode
                             break
 
                     except Exception as e:
-                        # print(f"⚠️ Frame processing error: {e}")
-                        # events.append("crash")
-                        # restart_track()
-                        # done = True
-                        # time.sleep(4)
                         continue
 
-                print(f"📊 Episode {episode + 1} - Reward: {episode_reward:.2f}, Steps: {episode_length}, ε: {epsilon:.3f}")
+                print(f"📊 Episode {episode + 1} - Reward: {episode_reward:.2f}, Steps: {episode_length}, ε: {epsilon:.3f}, Avg Reward/Step: {episode_reward/max(1, episode_length):.2f}")
                 
-                if (episode + 1) % 25 == 0:
-                    torch.save(q_net.state_dict(), f"trackmania_dqn_checkpoint_{episode + 1}.pth")
-                    print(f"💾 Checkpoint saved at episode {episode + 1}")
+                # IMPROVED CHECKPOINT SAVING with disk space management
+                if (episode + 1) % CHECKPOINT_SAVE_FREQUENCY == 0:
+                    checkpoint_filename = f"trackmania_dqn_checkpoint_{episode + 1}.pth"
+                    if safe_save_model(q_net.state_dict(), checkpoint_filename):
+                        # Clean up old checkpoints after successful save
+                        cleanup_old_checkpoints()
+                    
                     # Clear cache periodically
                     with cache_lock:
                         frame_cache.clear()
 
             print("🎉 Training completed!")
-            torch.save(q_net.state_dict(), "trackmania_dqn_final_optimized.pth")
+            
+            # Final save with safety check
+            if not safe_save_model(q_net.state_dict(), "trackmania_dqn_final_optimized.pth"):
+                print("⚠️ Could not save final model due to disk space issues")
 
         except KeyboardInterrupt:
             print("🛑 Training interrupted by user.")
         finally:
             release_all_keys()
-            torch.save(q_net.state_dict(), "trackmania_dqn_final_optimized.pth")
+            # Try to save final model even if interrupted
+            safe_save_model(q_net.state_dict(), "trackmania_dqn_interrupted.pth")
 
 if __name__ == "__main__":
     main()
