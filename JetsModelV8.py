@@ -64,7 +64,7 @@ EPSILON_DECAY = 10000 #change to 50000
 EPISODE_TIMEOUT = 300
 CRASH_THRESHOLD = 0.87
 STUCK_THRESHOLD = 10
-CHECKPOINT_CONFIRM_FRAMES = 10
+CHECKPOINT_CONFIRM_FRAMES = 2
 FINISH_CONFIRM_FRAMES = 30  # 5 seconds at 60 FPS
 VELOCITY_THRESHOLD = 3
 FRAME_SKIP = 4  # Process every 2nd frame to reduce load
@@ -145,7 +145,61 @@ class PrioritizedReplayBuffer:
     
     def __len__(self):
         return len(self.buffer)
+    
 
+def start_control_thread():
+    """Start the dedicated control thread"""
+    global control_thread, stop_control_thread
+    
+    stop_control_thread = False
+    control_thread = threading.Thread(target=control_thread_worker, daemon=True)
+    control_thread.start()
+    print("🎮 Control thread started")
+
+def stop_control_thread_func():
+    """Stop the dedicated control thread"""
+    global control_thread, stop_control_thread
+    
+    stop_control_thread = True
+    if control_thread and control_thread.is_alive():
+        control_thread.join(timeout=1.0)
+    force_release_all_keys()
+    print("🛑 Control thread stopped")
+
+def control_thread_worker():
+    """Dedicated thread for handling WASD controls"""
+    global stop_control_thread, current_action
+    
+    while not stop_control_thread:
+        try:
+            # Check for new actions (non-blocking)
+            try:
+                new_action = action_queue.get_nowait()
+                with action_lock:
+                    current_action = new_action
+                action_queue.task_done()
+            except:
+                pass  # No new action, continue with current
+            
+            # Execute current action
+            with action_lock:
+                action_to_execute = current_action.copy()
+            
+            # Press keys based on current action
+            for i, should_press in enumerate(action_to_execute):
+                if should_press:
+                    keyboard.press(ACTIONS[i])
+                else:
+                    keyboard.release(ACTIONS[i])
+            
+            time.sleep(0.016)  # ~60 FPS for smooth control
+            
+        except Exception as e:
+            print(f"Control thread error: {e}")
+            time.sleep(0.1)
+    
+    # Clean up - release all keys when thread stops
+    force_release_all_keys()
 
 def force_release_all_keys():
     """Force release all keys using Windows API"""
@@ -596,7 +650,7 @@ def detect_track_coverage_crash(mask):
     track_coverage_ratio = track_pixels / total_pixels
     
     # Return True if coverage is below threshold (crash condition)
-    is_crash = track_coverage_ratio < 0.2
+    is_crash = track_coverage_ratio < 0.20
     
     if is_crash:
         print(f"Track coverage crash detected! Coverage: {track_coverage_ratio:.3f} ({track_coverage_ratio*100:.1f}%)")
@@ -672,16 +726,17 @@ def detect_events(mask, prev_mask, f2, prev_positions, stuck_counter, checkpoint
         events.append("checkpoint_timeout")
 
                         # After you calculate mask_next:
-    # if current_time - last_checkpoint_time > 5:
-    #     if prev_mask is not None:
-    #         similarity = np.mean(prev_mask == mask)
-    #         if similarity < 0.98:
-    #             testingvar = 0
-    #         if similarity > 0.98:
-    #             testingvar += 1
-    #             if testingvar > 7:
-    #                 events.append("crash")
-    #                 testingvar = 0
+    if current_time - last_checkpoint_time > 5:
+        if prev_mask is not None:
+            similarity = np.mean(prev_mask == mask)
+            if similarity < 0.98:
+                testingvar = 0
+            if similarity > 0.985:
+                testingvar += 1
+                if testingvar > 7:
+                    events.append("crash")
+                    print("similarity crash")
+                    testingvar = 0
 
     # print(similarity)
 
@@ -816,21 +871,21 @@ class ReplayBuffer:
         return len(self.buffer)
     
 def press_action(action_idx):
-    pressed_keys = []
-
-    for i in range(len(action_idx)):
-        if action_idx[i] == 1:
-            keyboard.press(ACTIONS[i])
-            pressed_keys.append(i)
-
-    # Hold 'w' longer (index 2)
-    if 2 in pressed_keys:
-        time.sleep(0.2)
-    else:
-        time.sleep(0.01)
-
-    for i in pressed_keys:
-        keyboard.release(ACTIONS[i])
+    """Queue action for the dedicated control thread"""
+    global action_queue
+    
+    try:
+        # Clear any pending actions and add the new one
+        while not action_queue.empty():
+            try:
+                action_queue.get_nowait()
+                action_queue.task_done()
+            except:
+                break
+        
+        action_queue.put(action_idx.copy())
+    except Exception as e:
+        print(f"Error queuing action: {e}")
 
 def release_all_keys():
     for key in ACTIONS:
@@ -838,11 +893,23 @@ def release_all_keys():
 
 def restart_track():
     print("🔄 Restarting track...")
-    force_release_all_keys()  # Use the robust version
-    time.sleep(0.2)  # Longer wait
     
-    # More robust restart
-    for _ in range(3):  # Try multiple times
+    # Clear action queue
+    while not action_queue.empty():
+        try:
+            action_queue.get_nowait()
+            action_queue.task_done()
+        except:
+            break
+    
+    # Set action to no movement
+    with action_lock:
+        current_action = [0, 0, 0, 0]
+    
+    force_release_all_keys()
+    time.sleep(0.2)
+    
+    for _ in range(3):
         try:
             keyboard.press_and_release('Backspace')
             break
@@ -850,7 +917,7 @@ def restart_track():
             time.sleep(0.1)
     
     time.sleep(2)
-    force_release_all_keys()  # Ensure clean state
+    force_release_all_keys()
 
 def calculate_distance_from_track_center(car_center, mask):
     """Calculate how far the car is from the center of the track"""
@@ -1040,7 +1107,7 @@ def main():
     
     print("🔧 Loading segmentation model...")
     seg_model = load_segmentation_model(MODEL_PATH)
-
+    start_control_thread()
     q_net = QNetwork((3, INPUT_SIZE[0], INPUT_SIZE[1]), NUM_ACTIONS).to(device)  # Note: swapped order
     target_net = QNetwork((3, INPUT_SIZE[0], INPUT_SIZE[1]), NUM_ACTIONS).to(device)
     target_net.load_state_dict(q_net.state_dict())
@@ -1157,8 +1224,8 @@ def main():
                             events, stuck_counter, checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed, last_checkpoint_time = detect_events(
                                 mask_next, prev_mask, frame_next, prev_positions, stuck_counter, 
                                 checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed, last_checkpoint_time, current_time)
-                            if track_direction > 0.97 or track_direction < -0.97:
-                                events.append("crash")
+                            # if track_direction > 0.97 or track_direction < -0.97:
+                            #     events.append("crash")
                             # if track_direction < 0.01 and track_direction > -0.01:
                             #     track_direction_timeout +=1
                             #     if track_direction_timeout > 5:
@@ -1294,6 +1361,8 @@ def main():
         except KeyboardInterrupt:
             print("🛑 Training interrupted by user.")
         finally:
+            stop_control_thread_func()  # Add this line
+            release_all_keys()
             release_all_keys()
             # Try to save final model even if interrupted
             plt.figure(figsize=(10, 4))
