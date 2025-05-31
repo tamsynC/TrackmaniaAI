@@ -25,7 +25,6 @@ import matplotlib.pyplot as plt
 
 import keyboard
 import segmentation_models_pytorch as smp
-# from prioritized_replay import PrioritizedReplayBuffer, train_step_prioritized
 
 import os
 os.environ["TMPDIR"] = "F:/temp"
@@ -62,10 +61,10 @@ EPSILON_DECAY = 10000 #change to 50000
 EPISODE_TIMEOUT = 120
 CRASH_THRESHOLD = 0.87
 STUCK_THRESHOLD = 10
-CHECKPOINT_CONFIRM_FRAMES = 30
-FINISH_CONFIRM_FRAMES = 300  # 5 seconds at 60 FPS
+CHECKPOINT_CONFIRM_FRAMES = 10
+FINISH_CONFIRM_FRAMES = 30  # 5 seconds at 60 FPS
 VELOCITY_THRESHOLD = 3
-FRAME_SKIP = 8  # Process every 2nd frame to reduce load
+FRAME_SKIP = 4  # Process every 2nd frame to reduce load
 TRAIN_FREQUENCY = 1  # Train every 4 steps instead of every step
 CHECKPOINT_TIMEOUT = 100  # seconds without checkpoint before penalty
 CHECKPOINT_TIMEOUT_PENALTY = -500  # Large penalty for not reaching checkpoint in time
@@ -80,6 +79,65 @@ testingvar = 0
 
 
 
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity, alpha=0.6, beta=0.4, beta_increment=0.001):
+        self.capacity = capacity
+        self.alpha = alpha  # How much prioritization is used
+        self.beta = beta    # Importance sampling correction
+        self.beta_increment = beta_increment
+        
+        # Use deque for efficient operations
+        self.buffer = deque(maxlen=capacity)
+        self.priorities = deque(maxlen=capacity)
+        self.max_priority = 1.0
+        
+    def push(self, state, action, reward, next_state, done, events=None):
+        """Add experience with maximum priority for new experiences"""
+        experience = (state, action, reward, next_state, done, events)
+        self.buffer.append(experience)
+        self.priorities.append(self.max_priority)
+    
+    def sample(self, batch_size):
+        """Sample batch with priorities"""
+        if len(self.buffer) < batch_size:
+            return None
+            
+        # Convert to numpy arrays for efficient computation
+        priorities = np.array(self.priorities)
+        
+        # Calculate sampling probabilities
+        probs = priorities ** self.alpha
+        probs /= probs.sum()
+        
+        # Sample indices based on priorities
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs, replace=False)
+        
+        # Get experiences
+        experiences = [self.buffer[idx] for idx in indices]
+        states, actions, rewards, next_states, dones, events_list = zip(*experiences)
+        
+        # Calculate importance sampling weights
+        weights = (len(self.buffer) * probs[indices]) ** (-self.beta)
+        weights /= weights.max()  # Normalize weights
+        
+        # Increment beta for annealing
+        self.beta = min(1.0, self.beta + self.beta_increment)
+        
+        return (np.array(states), np.array(actions), np.array(rewards, dtype=np.float32),
+                np.array(next_states), np.array(dones, dtype=np.uint8), 
+                weights, indices)
+    
+    def update_priorities(self, indices, td_errors):
+        """Update priorities based on TD errors"""
+        for idx, td_error in zip(indices, td_errors):
+            priority = (abs(td_error) + 1e-6) ** self.alpha  # Small epsilon to avoid zero priority
+            if idx < len(self.priorities):
+                self.priorities[idx] = priority
+                self.max_priority = max(self.max_priority, priority)
+    
+    def __len__(self):
+        return len(self.buffer)
+
 
 def force_release_all_keys():
     """Force release all keys using Windows API"""
@@ -92,92 +150,188 @@ def force_release_all_keys():
 
 
 
-def robust_press_action(action_idx):
-    """More robust key pressing with state verification"""
-    # First, ensure all keys are released
-    force_release_all_keys()
-    
-    # Then press required keys
-    for i, pressed in enumerate(action_idx):
-        if pressed == 1:
-            try:
-                keyboard.press(ACTIONS[i])
-            except Exception as e:
-                print(f"Key press failed for {ACTIONS[i]}: {e}")
-                # Fallback to Windows API
-                vk_code = ord(ACTIONS[i].upper())
-                win32api.keybd_event(vk_code, 0, 0, 0)
 def train_step_prioritized(q_net, target_net, optimizer, replay_buffer):
-    """Modified training step to work with prioritized replay"""
+    """Enhanced training with prioritized experience replay"""
     if len(replay_buffer) < BATCH_SIZE:
-        return
-
+        return None
+    
     # Sample from prioritized buffer
     sample_result = replay_buffer.sample(BATCH_SIZE)
     if sample_result is None:
-        return
-        
+        return None
+    
     states, actions, rewards, next_states, dones, weights, indices = sample_result
-
+    
     states_v = torch.FloatTensor(states).to(device)
     next_states_v = torch.FloatTensor(next_states).to(device)
     actions_v = torch.FloatTensor(actions).to(device)
     rewards_v = torch.FloatTensor(rewards).to(device)
     dones_v = torch.FloatTensor(dones).to(device)
     weights_v = torch.FloatTensor(weights).to(device)
-
-    q_values = q_net(states_v)
     
-    with torch.no_grad():
-        next_q_values = target_net(next_states_v)
-        next_q_max = next_q_values.max(1)[0]
-        expected_q_values = rewards_v + (GAMMA * next_q_max * (1 - dones_v))
-
+    # Current Q values
+    q_values = q_net(states_v)
     state_action_values = (q_values * actions_v).sum(1)
+    
+    # Next Q values using Double DQN
+    with torch.no_grad():
+        # Use main network to select actions
+        next_q_main = q_net(next_states_v)
+        next_actions = next_q_main.max(1)[1].unsqueeze(1)
+        
+        # Use target network to evaluate actions
+        next_q_target = target_net(next_states_v)
+        next_q_max = next_q_target.gather(1, next_actions).squeeze()
+        
+        expected_q_values = rewards_v + (GAMMA * next_q_max * (1 - dones_v))
     
     # Calculate TD errors for priority updates
     td_errors = (expected_q_values - state_action_values).detach().cpu().numpy()
     
-    # Calculate weighted loss (importance sampling)
-    loss = (weights_v * F.mse_loss(state_action_values, expected_q_values, reduction='none')).mean()
-
+    # Weighted loss using importance sampling
+    loss = (weights_v * F.smooth_l1_loss(state_action_values, expected_q_values, reduction='none')).mean()
+    
+    # Optimize
     optimizer.zero_grad()
     loss.backward()
     torch.nn.utils.clip_grad_norm_(q_net.parameters(), 1.0)
     optimizer.step()
     
-    # Update priorities in replay buffer
+    # Update priorities
     replay_buffer.update_priorities(indices, td_errors)
-
-
-# Usage in main() function - replace the ReplayBuffer initialization:
-def initialize_prioritized_buffer():
-    """How to initialize the prioritized buffer in your main() function"""
-    # Replace this line:
-    # replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
     
-    # With this:
+    return loss.item()
+
+
+def calculate_experience_bonus(events, replay_buffer):
+    """Give bonus for rare/important experiences"""
+    bonus = 0
+    
+    # Count how often similar events occurred recently
+    if len(replay_buffer) > 1000:
+        recent_experiences = list(replay_buffer.buffer)[-1000:]  # Last 1000 experiences
+        
+        checkpoint_count = sum(1 for exp in recent_experiences if exp[5] and "checkpoint" in exp[5])
+        finish_count = sum(1 for exp in recent_experiences if exp[5] and "finish" in exp[5])
+        
+        # Bonus for rare positive events
+        if "checkpoint" in events:
+            rarity_bonus = max(0, 100 - checkpoint_count * 10)  # Less bonus if checkpoints are common
+            bonus += rarity_bonus
+            
+        if "finish" in events:
+            rarity_bonus = max(0, 500 - finish_count * 50)  # Big bonus for rare finishes
+            bonus += rarity_bonus
+    
+    return bonus
+
+
+class MultiStepBuffer:
+    def __init__(self, n_steps=3, gamma=0.99):
+        self.n_steps = n_steps
+        self.gamma = gamma
+        self.buffer = deque(maxlen=n_steps)
+    
+    def add(self, state, action, reward, next_state, done):
+        """Add transition to n-step buffer"""
+        self.buffer.append((state, action, reward, next_state, done))
+        
+        if len(self.buffer) == self.n_steps:
+            # Calculate n-step return
+            n_step_return = 0
+            for i, (_, _, r, _, d) in enumerate(self.buffer):
+                n_step_return += (self.gamma ** i) * r
+                if d:  # Episode ended
+                    break
+            
+            # Return n-step transition
+            first_state, first_action = self.buffer[0][:2]
+            last_next_state, last_done = self.buffer[-1][3:]
+            
+            return (first_state, first_action, n_step_return, last_next_state, last_done)
+        
+        return None
+    
+    def clear(self):
+        self.buffer.clear()
+
+
+
+
+
+
+
+
+def initialize_enhanced_replay_system():
+    """Initialize the enhanced replay system"""
+    # Replace regular ReplayBuffer with PrioritizedReplayBuffer
     replay_buffer = PrioritizedReplayBuffer(
         capacity=REPLAY_BUFFER_CAPACITY,
-        alpha=0.6,      # How much to prioritize (0.6 is good default)
-        beta=0.4,       # Importance sampling correction (starts low, increases)
-        beta_increment=0.001  # How fast beta increases
+        alpha=0.6,      # Prioritization strength
+        beta=0.4,       # Importance sampling correction
+        beta_increment=0.001  # Beta annealing rate
     )
-    return replay_buffer
+    
+    # Optional: Add multi-step learning
+    multi_step_buffer = MultiStepBuffer(n_steps=3, gamma=GAMMA)
+    
+    return replay_buffer, multi_step_buffer
+
+# Modified experience storage in your main loop:
+def store_experience_enhanced(replay_buffer, multi_step_buffer, prev_state, action_idx, reward, next_state, done, events):
+    """Enhanced experience storage with multi-step learning"""
+    
+    # Add experience bonus for rare events
+    experience_bonus = calculate_experience_bonus(events, replay_buffer)
+    enhanced_reward = reward + experience_bonus
+    
+    # Store in multi-step buffer
+    n_step_transition = multi_step_buffer.add(prev_state, action_idx, enhanced_reward, next_state, done)
+    
+    # If we have a complete n-step transition, add to replay buffer
+    if n_step_transition is not None:
+        state, action, n_step_return, final_next_state, final_done = n_step_transition
+        replay_buffer.push(state, action, n_step_return, final_next_state, final_done, events)
+    
+    # Always store single-step transition as well (for diversity)
+    replay_buffer.push(prev_state, action_idx, enhanced_reward, next_state, done, events)
+    
+    # Clear multi-step buffer if episode ended
+    if done:
+        multi_step_buffer.clear()
 
 
-# Modified buffer push in main loop - add events parameter:
-def example_buffer_push_usage():
-    """Example of how to modify your buffer.push() calls"""
+
+class AdaptiveTraining:
+    def __init__(self, initial_freq=4, min_freq=1, max_freq=8):
+        self.initial_freq = initial_freq
+        self.min_freq = min_freq
+        self.max_freq = max_freq
+        self.current_freq = initial_freq
+        self.loss_history = deque(maxlen=100)
     
-    # In your main training loop, when you call:
-    # replay_buffer.push(prev_state, action_idx, reward, next_state, done)
+    def should_train(self, step_idx):
+        """Decide whether to train based on adaptive frequency"""
+        return step_idx % self.current_freq == 0
     
-    # Change it to:
-    # replay_buffer.push(prev_state, action_idx, reward, next_state, done, events)
-    
-    # Where 'events' is the list of events from your detect_events() function
-    pass
+    def update_frequency(self, loss):
+        """Adjust training frequency based on loss"""
+        if loss is not None:
+            self.loss_history.append(loss)
+            
+            if len(self.loss_history) >= 50:
+                recent_loss = np.mean(list(self.loss_history)[-20:])
+                older_loss = np.mean(list(self.loss_history)[-50:-20])
+                
+                # If loss is improving, train less frequently
+                if recent_loss < older_loss * 0.9:
+                    self.current_freq = min(self.max_freq, self.current_freq + 1)
+                # If loss is getting worse, train more frequently
+                elif recent_loss > older_loss * 1.1:
+                    self.current_freq = max(self.min_freq, self.current_freq - 1)
+
+
+
 
 
 # Additional helper function to analyze buffer priorities (optional)
@@ -193,7 +347,7 @@ def analyze_buffer_priorities(replay_buffer):
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print("CODEITERATION5")
+print("CODEITERATION7")
 print(f"Using device: {device}")
 
 def check_disk_space(path="."):
@@ -422,6 +576,46 @@ def check_checkpoint_timeout(last_checkpoint_time, current_time):
         return False
     return (current_time - last_checkpoint_time) > CHECKPOINT_TIMEOUT
 
+def detect_track_coverage_crash(mask):
+
+    track_mask = (mask == LABEL_TRACK)
+    track_pixels = np.sum(track_mask)
+    
+    # Calculate total pixels in the frame
+    total_pixels = mask.shape[0] * mask.shape[1]
+    
+    # Calculate track coverage ratio
+    track_coverage_ratio = track_pixels / total_pixels
+    
+    # Return True if coverage is below threshold (crash condition)
+    is_crash = track_coverage_ratio < 0.2
+    
+    if is_crash:
+        print(f"Track coverage crash detected! Coverage: {track_coverage_ratio:.3f} ({track_coverage_ratio*100:.1f}%)")
+    
+    return is_crash
+
+
+def simple_checkpoint_detection(mask, prev_checkpoint_pixels=0):
+    """Simple checkpoint detection based on screen coverage"""
+    checkpoint_mask = (mask == LABEL_CHECKPOINT)
+    current_checkpoint_pixels = np.sum(checkpoint_mask)
+    
+    # Calculate what percentage of screen the checkpoint takes up
+    total_pixels = mask.shape[0] * mask.shape[1]
+    checkpoint_ratio = current_checkpoint_pixels / total_pixels
+    
+    # Detect when checkpoint becomes prominent (adjust threshold as needed)
+    # You might need to experiment with this value: 0.01, 0.015, 0.02, etc.
+    threshold = 0.07  # 1.5% of screen
+    
+    if checkpoint_ratio > threshold:
+        print(f"Checkpoint detected! Screen coverage: {checkpoint_ratio:.3f} ({checkpoint_ratio*100:.1f}%)")
+        return True
+    
+    return False
+
+
 def detect_events(mask, prev_mask, f2, prev_positions, stuck_counter, checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed, last_checkpoint_time, current_time):
     """Optimized event detection"""
     global testingvar
@@ -440,16 +634,21 @@ def detect_events(mask, prev_mask, f2, prev_positions, stuck_counter, checkpoint
     if car_bbox is None or not boxes_overlap(car_bbox, track_bbox):
         events.append("out_of_bounds")
 
-    # Simplified checkpoint detection
-    if np.any(checkpoint_mask & car_mask):
-        checkpoint_counter += 1
-        if checkpoint_counter >= CHECKPOINT_CONFIRM_FRAMES and not checkpoint_confirmed:
-            events.append("checkpoint")
-            checkpoint_confirmed = True
-            last_checkpoint_time = current_time  # Update last checkpoint time
-    else:
-        checkpoint_counter = 0
-        checkpoint_confirmed = False
+    if detect_track_coverage_crash(mask):
+        events.append("crash")
+
+
+    # # Simplified checkpoint detection
+    # if np.any(checkpoint_mask & car_mask):
+    #     checkpoint_counter += 1
+    #     if checkpoint_counter >= CHECKPOINT_CONFIRM_FRAMES and not checkpoint_confirmed:
+    #         events.append("checkpoint")
+    #         checkpoint_confirmed = True
+    #         last_checkpoint_time = current_time  # Update last checkpoint time
+    #         print("checkpoint reached")
+    # else:
+    #     checkpoint_counter = 0
+    #     checkpoint_confirmed = False
 
     # Simplified finish line detection
     if np.any(finish_mask & car_mask):
@@ -840,8 +1039,8 @@ def main():
     target_net.eval()
 
     optimizer = optim.Adam(q_net.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
-    replay_buffer = ReplayBuffer(REPLAY_BUFFER_CAPACITY)
-
+    replay_buffer, multi_step_buffer = initialize_enhanced_replay_system()
+    adaptive_trainer = AdaptiveTraining()
 
     epsilon = EPSILON_START
     epsilon_decay_step = 0.00005
@@ -958,6 +1157,19 @@ def main():
                                     events.append("crash")
                             else:
                                 track_direction_timeout = 0
+
+                            checkpoint_detected = simple_checkpoint_detection(mask_next)
+
+                            if checkpoint_detected:
+                                checkpoint_counter += 1
+                                if checkpoint_counter >= CHECKPOINT_CONFIRM_FRAMES and not checkpoint_confirmed:
+                                    events.append("checkpoint")
+                                    checkpoint_confirmed = True
+                                    last_checkpoint_time = current_time
+                                    print("checkpoint reached")
+                            else:
+                                checkpoint_counter = 0
+                                checkpoint_confirmed = False
                             reward = reward_from_events(events, episode_length, EPISODE_TIMEOUT * 60, track_direction, car_speed, progress_delta, consecutive_checkpoints, car_center, mask_next)
                             
                             # Add to replay buffer with previous state and current reward
@@ -968,11 +1180,11 @@ def main():
                             # Check if episode should end
                             done = "finish" in events or "crash" in events or "stuck" in events or stuck_counter > 10
                             
-                            replay_buffer.push(prev_state, prev_action_idx, reward, next_state, done)
-                            
-                            # Train more frequently
-                            if len(replay_buffer) >= BATCH_SIZE * 4:
-                                train_step(q_net, target_net, optimizer, replay_buffer)
+                            store_experience_enhanced(replay_buffer, multi_step_buffer, prev_state, action_idx, reward, next_state, done, events)
+
+                            if adaptive_trainer.should_train(step_idx):
+                                loss = train_step_prioritized(q_net, target_net, optimizer, replay_buffer)
+                                adaptive_trainer.update_frequency(loss)
                             
                             episode_reward += reward
 
@@ -1015,17 +1227,18 @@ def main():
                         episode_reward += reward
                         
                         # Training (less frequent)
-                        if prev_frame is not None and step_idx % TRAIN_FREQUENCY == 0:
-                            resized_prev_frame = cv2.resize(prev_frame, INPUT_SIZE)
-                            prev_state = preprocess_frame(resized_prev_frame)
-                            if events:
-                                print(f"📍 Events detected: {events}")
+                        # if prev_frame is not None and step_idx % TRAIN_FREQUENCY == 0:
+                        #     resized_prev_frame = cv2.resize(prev_frame, INPUT_SIZE)
+                        #     prev_state = preprocess_frame(resized_prev_frame)
+                        #     if events:
+                        #         print(f"📍 Events detected: {events}")
 
-                            # replay_buffer.push(prev_state, action_idx, reward, next_state, done, events)
-                            replay_buffer.push(prev_state, action_idx, reward, next_state, done)
+                        #     # replay_buffer.push(prev_state, action_idx, reward, next_state, done, events)
+                        #     store_experience_enhanced(replay_buffer, multi_step_buffer, prev_state, action_idx, reward, next_state, done, events)
 
-                            train_step(q_net, target_net, optimizer, replay_buffer)
-
+                        #     if adaptive_trainer.should_train(step_idx):
+                        #         loss = train_step_prioritized(q_net, target_net, optimizer, replay_buffer)
+                        #         adaptive_trainer.update_frequency(loss)
                             # train_step_prioritized(q_net, target_net, optimizer, replay_buffer)
 
 
