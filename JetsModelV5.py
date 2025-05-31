@@ -879,9 +879,9 @@ def main():
                             action_idx = []
                             for i, weight in enumerate(ACTION_WEIGHTS):
                                 if i == 0:
-                                    adjusted_weight = weight * (1.5 if track_direction < -0.3 else 0.5)
+                                    adjusted_weight = weight * (1.5 if track_direction > -0.3 else 0.5)
                                 elif i == 1:
-                                    adjusted_weight = weight * (1.5 if track_direction > 0.3 else 0.5)
+                                    adjusted_weight = weight * (1.5 if track_direction < 0.3 else 0.5)
                                 else:
                                     adjusted_weight = weight
                                 

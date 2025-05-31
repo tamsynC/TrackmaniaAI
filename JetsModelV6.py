@@ -704,13 +704,13 @@ def select_action(q_net, state, epsilon, track_direction):
         action_idx = [0, 0, 0, 0]
         
         # Always consider turning based on track direction
-        if track_direction > 0.35:  # Need to turn right
-            if random.random() < 0.6:  # 70% chance to turn right
-                action_idx[1] = 1  # Right
-        elif track_direction < -0.35:  # Need to turn left  
-            if random.random() < 0.6:  # 70% chance to turn left
-                action_idx[0] = 1  # Left
-        
+        if track_direction > 0.4:  # Need to turn right
+            if random.random() < 0.4:  # 70% chance to turn right
+                action_idx[0] = 1  # Right
+        elif track_direction < -0.4:  # Need to turn left  
+            if random.random() < 0.4:  # 70% chance to turn left
+                action_idx[1] = 1  # Left
+        print(track_direction)
         # Forward/backward decision
         forward_prob = 0.7  # 80% chance to go forward
         if random.random() < forward_prob:
