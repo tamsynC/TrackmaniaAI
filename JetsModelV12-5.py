@@ -51,16 +51,16 @@ LABEL_FINISH = 3
 
 
 BATCH_SIZE = 64  
-GAMMA = 0.95
-LEARNING_RATE = 1e-4
+GAMMA = 0.99
+LEARNING_RATE = 1e-5
 REPLAY_BUFFER_CAPACITY = 200000    
 TARGET_UPDATE_FREQ = 100  
 EPSILON_START = 1.0
-EPSILON_END = 0.05
-EPSILON_DECAY = 10000 
+EPSILON_END = 0.03
+EPSILON_DECAY = 1000000
 
 
-EPISODE_TIMEOUT = 300
+EPISODE_TIMEOUT = 20000
 CRASH_THRESHOLD = 0.87
 STUCK_THRESHOLD = 10
 CHECKPOINT_CONFIRM_FRAMES = 2
@@ -918,7 +918,7 @@ def detect_events(mask, prev_mask, f2, prev_positions, stuck_counter, checkpoint
     if current_time - last_checkpoint_time > 5 and prev_mask is not None:
         similarity = np.mean(prev_mask == mask)
 
-        similarity_history.append(similarity > 0.987)
+        similarity_history.append(similarity > 0.98)
 
         if similarity_history.count(True) >= 5: 
             events.append("similarity_crash")
@@ -1287,7 +1287,7 @@ def main():
                     current_time = time.time()
                     if current_time - episode_start_time > EPISODE_TIMEOUT:
                         print("⏰ Episode timeout - restarting track")
-                        episode_reward -= 1000
+                        episode_reward -= 3000
                         restart_track()
                         break
                     if episode_length % 100 == 0:
