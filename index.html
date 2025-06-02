@@ -289,14 +289,80 @@
         <h2 class="title is-3">Results discussion and reflection</h2>
 
         <div class="content has-text-justified">
-          <p>
-            This is a sample text to show how the results discussion and reflection would look like in your own project. You can use this space to describe the main results obtained, the limitations of your work, and the future work that could be done.
-          </p>
+			<p>
+			  Our custom reward function is designed to guide a Deep Q-Network (DQN) agent toward fast, efficient, and intelligent driving behavior. Rewards and penalties are allocated as follows:
+			</p>
+
+			<ul>
+			  <li><strong>Checkpoint Reached:</strong> +25 points for each checkpoint.</li>
+			  <li><strong>Consecutive Checkpoint Bonus:</strong> +25 points for each checkpoint in a streak.</li>
+			  <li><strong>Speed Bonuses:</strong> Extra rewards based on time since last checkpoint:
+				<ul>
+				  <li><strong>&lt; 1.5s:</strong> +70 </li>
+				  <li><strong>&lt; 3.0s:</strong> +40 </li>
+				  <li><strong>&lt; 5.0s:</strong> +30 </li>
+				  <li><strong>&lt; 6.0s:</strong> +20 </li>
+				</ul>
+			  </li>
+			  <li><strong>Direction Bonus:</strong> Up to +5 points for staying aligned with the track.</li>
+			  <li><strong>Race Completion:</strong> +1000 points for finishing the course.</li>
+			</ul>
+
+			<p><strong>Penalties:</strong></p>
+			<ul>
+			  <li><strong>Too Fast (Possible Cheating):</strong> -5 if checkpoint is reached in under 0.5s.</li>
+			  <li><strong>Crash:</strong> -10 base, reduced by 2 for each checkpoint in a streak.</li>
+			  <li><strong>Similarity Crash:</strong> -10 for repeated crash behavior.</li>
+			  <li><strong>Stuck:</strong> -15 base, reduced by 3 for each consecutive checkpoint.</li>
+			  <li><strong>Out of Bounds:</strong> -7 base, reduced by checkpoint streak.</li>
+			  <li><strong>Timeout:</strong> -5 if too long since last checkpoint.</li>
+			</ul>
+
+			<p>
+			  This dynamic reward structure encourages the agent to learn not just to reach checkpoints, but to do so quickly, smoothly, and consistently—while penalizing unsafe or inefficient actions.
+			</p>
+
 
         </div>
       </div>
     </div>
     <!--/ Concurrent Work. -->
+	<div class="columns is-centered">
+	  <div class="column is-full-width">
+		<h2 class="title is-3">DQN Action Selection</h2>
+
+		<div class="content has-text-justified">
+		  <p>
+			The agent uses a Deep Q-Network (DQN) to decide which action to take at every step. The action selection balances exploration (random behavior) and exploitation (choosing the best-known action) based on a probability value <code>epsilon</code>.
+		  </p>
+
+		  <p><strong>Epsilon-Greedy Strategy:</strong></p>
+		  <ul>
+			<li><strong>Random Action:</strong> With probability <code>epsilon</code>, the agent selects a random action. This encourages exploration of new strategies.</li>
+			<li><strong>Track-Aware Bias:</strong> Random actions are influenced by the <code>track_direction</code>. If the car is veering left or right, the random action is slightly biased to correct the path.</li>
+			<li>Most often, forward (<code>W</code>) is selected randomly; sometimes backward (<code>S</code>) is chosen.</li>
+		  </ul>
+
+		  <p><strong>Neural Network Inference:</strong></p>
+		  <ul>
+			<li>With probability <code>1 - epsilon</code>, the agent uses the DQN to compute Q-values for each possible action.</li>
+			<li>The input <code>state</code> is converted into a tensor and processed by the network.</li>
+			<li>The network outputs values for each action, which are passed through a sigmoid function to convert them into probabilities.</li>
+			<li>The output probabilities determine whether to:
+			  <ul>
+				<li>Turn <strong>left</strong> or <strong>right</strong> if probabilities exceed a high threshold (0.98).</li>
+				<li>Move <strong>forward</strong> or <strong>backward</strong> based on the highest motion probability.</li>
+			  </ul>
+			</li>
+			<li>All computations are optimized for GPU usage and memory efficiency.</li>
+		  </ul>
+
+		  <p>
+			This approach ensures the agent learns to make reliable, context-aware decisions, while still occasionally exploring alternate behaviors to improve learning.
+		  </p>
+		</div>
+	  </div>
+	</div>
 
   </div>
 </section>
