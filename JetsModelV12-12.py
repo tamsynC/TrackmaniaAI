@@ -328,10 +328,60 @@ def force_release_all_keys():
     time.sleep(0.005)
 
 
-def train_step_double_dqn(q_net, target_net, optimizer, replay_buffer):
-    """Double DQN training step for more stable learning"""
-    if len(replay_buffer) < MIN_REPLAY_SIZE:
+# def train_step_double_dqn(q_net, target_net, optimizer, replay_buffer):
+#     """Double DQN training step for more stable learning"""
+#     # if len(replay_buffer) < MIN_REPLAY_SIZE:
+#     #     return None
+    
+#     sample_result = replay_buffer.sample(BATCH_SIZE)
+#     if sample_result is None:
+#         return None
+    
+#     states, actions, rewards, next_states, dones, weights, indices = sample_result
+    
+#     states_v = torch.FloatTensor(states).to(device)
+#     next_states_v = torch.FloatTensor(next_states).to(device)
+#     actions_v = torch.LongTensor(actions).to(device)
+#     rewards_v = torch.FloatTensor(rewards).to(device)
+#     dones_v = torch.BoolTensor(dones).to(device)
+#     weights_v = torch.FloatTensor(weights).to(device)
+    
+#     # Current Q values
+#     current_q_values = q_net(states_v).gather(1, actions_v.unsqueeze(1)).squeeze(1)
+    
+#     # Double DQN: use main network to select actions, target network to evaluate
+#     with torch.no_grad():
+#         next_q_main = q_net(next_states_v)
+#         next_actions = next_q_main.max(1)[1]
+#         next_q_target = target_net(next_states_v)
+#         next_q_values = next_q_target.gather(1, next_actions.unsqueeze(1)).squeeze(1)
+        
+#         target_q_values = rewards_v + (GAMMA * next_q_values * ~dones_v)
+    
+#     # Compute loss
+#     td_errors = target_q_values - current_q_values
+#     loss = (weights_v * F.smooth_l1_loss(current_q_values, target_q_values, reduction='none')).mean()
+    
+#     # Optimize
+#     optimizer.zero_grad()
+#     loss.backward()
+#     torch.nn.utils.clip_grad_norm_(q_net.parameters(), 1.0)
+#     optimizer.step()
+    
+#     # Update priorities
+#     replay_buffer.update_priorities(indices, td_errors.detach().cpu().numpy())
+    
+#     return loss.item()
+
+
+
+
+
+def train_step_prioritized(q_net, target_net, optimizer, replay_buffer):
+    """Enhanced training with prioritized experience replay"""
+    if len(replay_buffer) < BATCH_SIZE:
         return None
+    
     
     sample_result = replay_buffer.sample(BATCH_SIZE)
     if sample_result is None:
@@ -341,38 +391,43 @@ def train_step_double_dqn(q_net, target_net, optimizer, replay_buffer):
     
     states_v = torch.FloatTensor(states).to(device)
     next_states_v = torch.FloatTensor(next_states).to(device)
-    actions_v = torch.LongTensor(actions).to(device)
+    actions_v = torch.FloatTensor(actions).to(device)
     rewards_v = torch.FloatTensor(rewards).to(device)
-    dones_v = torch.BoolTensor(dones).to(device)
+    dones_v = torch.FloatTensor(dones).to(device)
     weights_v = torch.FloatTensor(weights).to(device)
     
-    # Current Q values
-    current_q_values = q_net(states_v).gather(1, actions_v.unsqueeze(1)).squeeze(1)
     
-    # Double DQN: use main network to select actions, target network to evaluate
+    q_values = q_net(states_v)
+    state_action_values = (q_values * actions_v).sum(1)
+    
+    
     with torch.no_grad():
-        next_q_main = q_net(next_states_v)
-        next_actions = next_q_main.max(1)[1]
-        next_q_target = target_net(next_states_v)
-        next_q_values = next_q_target.gather(1, next_actions.unsqueeze(1)).squeeze(1)
         
-        target_q_values = rewards_v + (GAMMA * next_q_values * ~dones_v)
+        next_q_main = q_net(next_states_v)
+        next_actions = next_q_main.max(1)[1].unsqueeze(1)
+        
+        
+        next_q_target = target_net(next_states_v)
+        next_q_max = next_q_target.gather(1, next_actions).squeeze()
+        
+        expected_q_values = rewards_v + (GAMMA * next_q_max * (1 - dones_v))
     
-    # Compute loss
-    td_errors = target_q_values - current_q_values
-    loss = (weights_v * F.smooth_l1_loss(current_q_values, target_q_values, reduction='none')).mean()
     
-    # Optimize
+    td_errors = (expected_q_values - state_action_values).detach().cpu().numpy()
+    
+    
+    loss = (weights_v * F.smooth_l1_loss(state_action_values, expected_q_values, reduction='none')).mean()
+    
+    
     optimizer.zero_grad()
     loss.backward()
     torch.nn.utils.clip_grad_norm_(q_net.parameters(), 1.0)
     optimizer.step()
     
-    # Update priorities
-    replay_buffer.update_priorities(indices, td_errors.detach().cpu().numpy())
+    
+    replay_buffer.update_priorities(indices, td_errors)
     
     return loss.item()
-
 
 
 
@@ -1083,10 +1138,10 @@ def select_action(q_net, state, epsilon, track_direction):
             action[3] = 1
         
         if track_direction > 0.3:
-            if random.random() < 0.2:
+            if random.random() < 0.5:
                 action[1] = 1
         elif track_direction < -0.3:
-            if random.random() < 0.2:
+            if random.random() < 0.5:
                 action[0] = 1
         else:
             if random.random() < 0.2:
@@ -1376,7 +1431,7 @@ def main():
                                 store_experience_enhanced(replay_buffer, multi_step_buffer, prev_state, prev_action, reward, next_state, done, events)
                                 # Train the network
                                 if adaptive_trainer.should_train(step_idx):
-                                    loss = train_step_double_dqn(q_net, target_net, optimizer, replay_buffer)
+                                    loss = train_step_prioritized(q_net, target_net, optimizer, replay_buffer)
                                     adaptive_trainer.update_frequency(loss)
                         
                         # Update episode statistics
