@@ -41,6 +41,6 @@ Running the Code:
 ```python
 MODEL_PATH = 'unet_model.pth'  # Segmentation model path
 DQN_MODEL_PATH = 'trackmania_dqn_interrupted.pth'  # Your trained DQN model
-
+```
 4.	Run: python ModelRunJetV6.py
 5.	Click on the Trackmania window, the model will then run.
