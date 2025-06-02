@@ -53,13 +53,13 @@ LABEL_FINISH = 3
 
 BATCH_SIZE = 64  
 GAMMA = 0.99
-LEARNING_RATE = 1e-5
+LEARNING_RATE = 5e-4
 REPLAY_BUFFER_CAPACITY = 50000
 MIN_REPLAY_SIZE = 10000
 TARGET_UPDATE_FREQ = 100  
 EPSILON_START = 0.95
 EPSILON_END = 0.07
-EPSILON_DECAY = 15000
+EPSILON_DECAY = 5000
 
 
 EPISODE_TIMEOUT = 150
@@ -1136,10 +1136,17 @@ def select_action(q_net, state, epsilon, track_direction):
             action[2] = 1
         elif random.random() < 0.1:
             action[3] = 1
-        
-        if track_direction > 0.3:
+
+
+        if track_direction > 0.7:
+            if random.random() < 0.7:
+                action[1] = 1
+        elif track_direction > 0.3:
             if random.random() < 0.5:
                 action[1] = 1
+        elif track_direction < -0.7:
+            if random.random() < 0.7:
+                action[0] = 1                
         elif track_direction < -0.3:
             if random.random() < 0.5:
                 action[0] = 1
