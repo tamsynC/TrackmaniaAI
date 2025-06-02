@@ -76,7 +76,7 @@ CHECKPOINT_TIMEOUT_PENALTY = -50
 
 CHECKPOINT_SAVE_FREQUENCY = 50  
 MAX_CHECKPOINTS_TO_KEEP = 10
-MIN_FREE_SPACE_GB = 1.0        
+MIN_FREE_SPACE_GB = 1.0         
 
 
 last_checkpoint_reach_time = None
@@ -328,11 +328,10 @@ def force_release_all_keys():
     time.sleep(0.005)
 
 
-def train_step_prioritized(q_net, target_net, optimizer, replay_buffer):
-    """Enhanced training with prioritized experience replay"""
-    if len(replay_buffer) < BATCH_SIZE:
+def train_step_double_dqn(q_net, target_net, optimizer, replay_buffer):
+    """Double DQN training step for more stable learning"""
+    if len(replay_buffer) < MIN_REPLAY_SIZE:
         return None
-    
     
     sample_result = replay_buffer.sample(BATCH_SIZE)
     if sample_result is None:
@@ -342,44 +341,37 @@ def train_step_prioritized(q_net, target_net, optimizer, replay_buffer):
     
     states_v = torch.FloatTensor(states).to(device)
     next_states_v = torch.FloatTensor(next_states).to(device)
-    actions_v = torch.FloatTensor(actions).to(device)
+    actions_v = torch.LongTensor(actions).to(device)
     rewards_v = torch.FloatTensor(rewards).to(device)
-    dones_v = torch.FloatTensor(dones).to(device)
+    dones_v = torch.BoolTensor(dones).to(device)
     weights_v = torch.FloatTensor(weights).to(device)
     
+    # Current Q values
+    current_q_values = q_net(states_v).gather(1, actions_v.unsqueeze(1)).squeeze(1)
     
-    q_values = q_net(states_v)
-    state_action_values = (q_values * actions_v).sum(1)
-    
-    
+    # Double DQN: use main network to select actions, target network to evaluate
     with torch.no_grad():
-        
         next_q_main = q_net(next_states_v)
-        next_actions = next_q_main.max(1)[1].unsqueeze(1)
-        
-        
+        next_actions = next_q_main.max(1)[1]
         next_q_target = target_net(next_states_v)
-        next_q_max = next_q_target.gather(1, next_actions).squeeze()
+        next_q_values = next_q_target.gather(1, next_actions.unsqueeze(1)).squeeze(1)
         
-        expected_q_values = rewards_v + (GAMMA * next_q_max * (1 - dones_v))
+        target_q_values = rewards_v + (GAMMA * next_q_values * ~dones_v)
     
+    # Compute loss
+    td_errors = target_q_values - current_q_values
+    loss = (weights_v * F.smooth_l1_loss(current_q_values, target_q_values, reduction='none')).mean()
     
-    td_errors = (expected_q_values - state_action_values).detach().cpu().numpy()
-    
-    
-    loss = (weights_v * F.smooth_l1_loss(state_action_values, expected_q_values, reduction='none')).mean()
-    
-    
+    # Optimize
     optimizer.zero_grad()
     loss.backward()
     torch.nn.utils.clip_grad_norm_(q_net.parameters(), 1.0)
     optimizer.step()
     
-    
-    replay_buffer.update_priorities(indices, td_errors)
+    # Update priorities
+    replay_buffer.update_priorities(indices, td_errors.detach().cpu().numpy())
     
     return loss.item()
-
 
 
 
@@ -997,39 +989,30 @@ class QNetwork(nn.Module):
         super(QNetwork, self).__init__()
         c, h, w = input_shape
         
-        
+        # More gradual feature extraction
         self.conv = nn.Sequential(
             nn.Conv2d(c, 32, kernel_size=8, stride=4, padding=2),
-            nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=6, stride=3, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(128),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
         )
         
-        
+        # Calculate conv output size
         with torch.no_grad():
             dummy_input = torch.zeros(1, c, h, w)
             conv_output = self.conv(dummy_input)
             linear_input_size = conv_output.view(1, -1).size(1)
         
-        
+        # Simpler, more stable fully connected layers
         self.fc = nn.Sequential(
-            nn.Dropout(0.1),
-            nn.Linear(linear_input_size, 1024),
+            nn.Linear(linear_input_size, 512),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(1024, 512),
-            nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.2),
             nn.Linear(512, 256),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(256, num_actions)
         )
 
@@ -1037,12 +1020,6 @@ class QNetwork(nn.Module):
         x = self.conv(x)
         x = x.view(x.size(0), -1)
         return self.fc(x)
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = x.view(x.size(0), -1)
-        return self.fc(x)
-    
 
 def press_action(action_idx):
     """Queue action for the dedicated control thread"""
@@ -1240,6 +1217,14 @@ class PrioritizedReplayBuffer:
     
     
 
+
+# def get_epsilon(step, start=EPSILON_START, end=EPSILON_END, decay=EPSILON_DECAY):
+#     """More gradual epsilon decay"""
+#     if step < 1000:  # Warm-up period with high exploration
+#         return start
+#     return end + (start - end) * np.exp(-1.0 * (step - 1000) / decay)
+
+
 def main():
     free_space = check_disk_space()
     print(f"💾 Available disk space: {free_space:.2f}GB")
@@ -1391,7 +1376,7 @@ def main():
                                 store_experience_enhanced(replay_buffer, multi_step_buffer, prev_state, prev_action, reward, next_state, done, events)
                                 # Train the network
                                 if adaptive_trainer.should_train(step_idx):
-                                    loss = train_step_prioritized(q_net, target_net, optimizer, replay_buffer)
+                                    loss = train_step_double_dqn(q_net, target_net, optimizer, replay_buffer)
                                     adaptive_trainer.update_frequency(loss)
                         
                         # Update episode statistics
