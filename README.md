@@ -36,8 +36,11 @@ Training:
 ![image](https://github.com/user-attachments/assets/32af277e-dcd4-4146-9be8-85c9705e3bf6)
 Running the Code:
 1.	Open the Trackmania map.
-2.	If required change model path on lines 17 & 19:
-  	  MODEL_PATH = 'unet_model.pth'  # Segmentation model path
-      DQN_MODEL_PATH = 'trackmania_dqn_interrupted.pth'  # Your trained DQN model
+2. If required, change model paths on lines 17 & 19:
+
+```python
+MODEL_PATH = 'unet_model.pth'  # Segmentation model path
+DQN_MODEL_PATH = 'trackmania_dqn_interrupted.pth'  # Your trained DQN model
+
 4.	Run: python ModelRunJetV6.py
 5.	Click on the Trackmania window, the model will then run.
