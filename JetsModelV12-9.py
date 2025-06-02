@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 
 import keyboard
 import segmentation_models_pytorch as smp
+import gc
 
 from queue import Queue
 import threading
@@ -36,7 +37,7 @@ os.environ["TMP"] = "F:/temp"
 
 MODEL_PATH = 'unet_model.pth'
 NUM_CLASSES = 5
-INPUT_SIZE = (512, 512)
+INPUT_SIZE = (256, 256)
 
 ACTIONS = ['a', 'd', 'w', 's']
 ACTION_INDEX = [0, 1, 2, 3]
@@ -52,29 +53,28 @@ LABEL_FINISH = 3
 
 BATCH_SIZE = 64  
 GAMMA = 0.99
-LEARNING_RATE = 4e-5
+LEARNING_RATE = 1e-4
 REPLAY_BUFFER_CAPACITY = 5500    
 TARGET_UPDATE_FREQ = 100  
 EPSILON_START = 1.0
 EPSILON_END = 0.03
-EPSILON_DECAY = 10000
+EPSILON_DECAY = 500
 
 
-EPISODE_TIMEOUT = 400
+EPISODE_TIMEOUT = 150
 CRASH_THRESHOLD = 0.87
 STUCK_THRESHOLD = 10
 CHECKPOINT_CONFIRM_FRAMES = 2
 FINISH_CONFIRM_FRAMES = 30  
 VELOCITY_THRESHOLD = 3
-FRAME_SKIP = 4  
-TRAIN_FREQUENCY = 1  
+FRAME_SKIP = 1
+TRAIN_FREQUENCY = 1
 CHECKPOINT_TIMEOUT = 100  
-CHECKPOINT_TIMEOUT_PENALTY = -500  
-
+CHECKPOINT_TIMEOUT_PENALTY = -50  
 
 
 CHECKPOINT_SAVE_FREQUENCY = 50  
-MAX_CHECKPOINTS_TO_KEEP = 3     
+MAX_CHECKPOINTS_TO_KEEP = 10
 MIN_FREE_SPACE_GB = 1.0         
 
 
@@ -100,67 +100,17 @@ checkpoint_detection_thread = None
 last_detected_checkpoints = []
 checkpoint_event_queue = Queue()
 
-
-class PrioritizedReplayBuffer:
-    def __init__(self, capacity, alpha=0.6, beta=0.4, beta_increment=0.001):
-        self.capacity = capacity
-        self.alpha = alpha  
-        self.beta = beta    
-        self.beta_increment = beta_increment
-        
-
-        self.buffer = deque(maxlen=capacity)
-        self.priorities = deque(maxlen=capacity)
-        self.max_priority = 1.0
-        
-    def push(self, state, action, reward, next_state, done, events=None):
-        """Add experience with maximum priority for new experiences"""
-        experience = (state, action, reward, next_state, done, events)
-        self.buffer.append(experience)
-        self.priorities.append(self.max_priority)
-    
-    def sample(self, batch_size):
-        """Sample batch with priorities"""
-        if len(self.buffer) < batch_size:
-            return None
-            
-
-        priorities = np.array(self.priorities)
-        
-
-        probs = priorities ** self.alpha
-        probs /= probs.sum()
-        
-
-        indices = np.random.choice(len(self.buffer), batch_size, p=probs, replace=False)
-        
-        
-        experiences = [self.buffer[idx] for idx in indices]
-        states, actions, rewards, next_states, dones, events_list = zip(*experiences)
-        
-        
-        weights = (len(self.buffer) * probs[indices]) ** (-self.beta)
-        weights /= weights.max()  
-        
-        
-        self.beta = min(1.0, self.beta + self.beta_increment)
-        
-        return (np.array(states), np.array(actions), np.array(rewards, dtype=np.float32),
-                np.array(next_states), np.array(dones, dtype=np.uint8), 
-                weights, indices)
-    
-    def update_priorities(self, indices, td_errors):
-        """Update priorities based on TD errors"""
-        for idx, td_error in zip(indices, td_errors):
-            priority = (abs(td_error) + 1e-6) ** self.alpha  
-            if idx < len(self.priorities):
-                self.priorities[idx] = priority
-                self.max_priority = max(self.max_priority, priority)
-    
-    def __len__(self):
-        return len(self.buffer)
-    
-
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print("CODEITERATION11")
+print(f"Using device: {device}")
+print(torch.cuda.is_available())
+print(torch.version.cuda)
+def clear_cuda_cache():
+    """Clear CUDA cache and run garbage collection"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
 def start_control_thread():
     """Start the dedicated control thread"""
     global control_thread, stop_control_thread
@@ -179,6 +129,7 @@ def stop_control_thread_func():
         control_thread.join(timeout=1.0)
     force_release_all_keys()
     print("🛑 Control thread stopped")
+
 
 def control_thread_worker():
     """Dedicated thread for handling WASD controls with short tap behavior"""
@@ -234,6 +185,7 @@ def control_thread_worker():
     force_release_all_keys()
 
 
+
 def force_release_all_keys():
     """Force release all keys using Windows API"""
     for key in ACTIONS:
@@ -244,197 +196,59 @@ def force_release_all_keys():
     time.sleep(0.005)
 
 
-
-def train_step_prioritized(q_net, target_net, optimizer, replay_buffer):
-    """Enhanced training with prioritized experience replay"""
-    if len(replay_buffer) < BATCH_SIZE:
+def train_dqn(q_net, target_net, optimizer, replay_buffer):
+    """Optimized DQN training with better memory management"""
+    batch = replay_buffer.sample(BATCH_SIZE)
+    if batch is None:
         return None
     
+    states, actions, rewards, next_states, dones = batch
     
-    sample_result = replay_buffer.sample(BATCH_SIZE)
-    if sample_result is None:
-        return None
-    
-    states, actions, rewards, next_states, dones, weights, indices = sample_result
-    
-    states_v = torch.FloatTensor(states).to(device)
-    next_states_v = torch.FloatTensor(next_states).to(device)
-    actions_v = torch.FloatTensor(actions).to(device)
-    rewards_v = torch.FloatTensor(rewards).to(device)
-    dones_v = torch.FloatTensor(dones).to(device)
-    weights_v = torch.FloatTensor(weights).to(device)
-    
-    
-    q_values = q_net(states_v)
-    state_action_values = (q_values * actions_v).sum(1)
-    
-    
+    # Pre-allocate tensors with pinned memory for faster GPU transfer
     with torch.no_grad():
-        
-        next_q_main = q_net(next_states_v)
-        next_actions = next_q_main.max(1)[1].unsqueeze(1)
-        
-        
-        next_q_target = target_net(next_states_v)
-        next_q_max = next_q_target.gather(1, next_actions).squeeze()
-        
-        expected_q_values = rewards_v + (GAMMA * next_q_max * (1 - dones_v))
+        states = torch.FloatTensor(states).pin_memory().to(device, non_blocking=True)
+        actions = torch.FloatTensor(actions).pin_memory().to(device, non_blocking=True)
+        rewards = torch.FloatTensor(rewards).pin_memory().to(device, non_blocking=True)
+        next_states = torch.FloatTensor(next_states).pin_memory().to(device, non_blocking=True)
+        dones = torch.BoolTensor(dones).pin_memory().to(device, non_blocking=True)
     
+    # Current Q values
+    current_q_values = q_net(states)
+    current_q_values = (current_q_values * actions).sum(1)
     
-    td_errors = (expected_q_values - state_action_values).detach().cpu().numpy()
+    # Next Q values with explicit no_grad
+    with torch.no_grad():
+        next_q_values = target_net(next_states).max(1)[0].detach()
+        target_q_values = rewards + (GAMMA * next_q_values * ~dones)
+        target_q_values = target_q_values.detach()
     
+    # Loss calculation
+    loss = F.mse_loss(current_q_values, target_q_values)
     
-    loss = (weights_v * F.smooth_l1_loss(state_action_values, expected_q_values, reduction='none')).mean()
-    
-    
+    # Optimize with gradient clipping
     optimizer.zero_grad()
     loss.backward()
-    torch.nn.utils.clip_grad_norm_(q_net.parameters(), 1.0)
+    torch.nn.utils.clip_grad_norm_(q_net.parameters(), max_norm=1.0)
     optimizer.step()
     
+    # Clear intermediate tensors
+    del states, actions, rewards, next_states, dones
+    del current_q_values, next_q_values, target_q_values
     
-    replay_buffer.update_priorities(indices, td_errors)
+    loss_value = loss.item()
+    del loss
     
-    return loss.item()
-
-
-def calculate_experience_bonus(events, replay_buffer):
-    """Give bonus for rare/important experiences"""
-    bonus = 0
+    # Periodic CUDA cache clearing during training
+    if torch.cuda.is_available() and torch.cuda.memory_allocated() > 1e9:  # 1GB
+        torch.cuda.empty_cache()
     
-    
-    if len(replay_buffer) > 1000:
-        recent_experiences = list(replay_buffer.buffer)[-1000:]  
-        
-        checkpoint_count = sum(1 for exp in recent_experiences if exp[5] and "checkpoint" in exp[5])
-        finish_count = sum(1 for exp in recent_experiences if exp[5] and "finish" in exp[5])
-        
-        
-        if "checkpoint" in events:
-            rarity_bonus = max(0, 100 - checkpoint_count * 10)  
-            bonus += rarity_bonus
-            
-        if "finish" in events:
-            rarity_bonus = max(0, 500 - finish_count * 50)  
-            bonus += rarity_bonus
-    
-    return bonus
-
-
-class MultiStepBuffer:
-    def __init__(self, n_steps=3, gamma=0.99):
-        self.n_steps = n_steps
-        self.gamma = gamma
-        self.buffer = deque(maxlen=n_steps)
-    
-    def add(self, state, action, reward, next_state, done):
-        """Add transition to n-step buffer"""
-        self.buffer.append((state, action, reward, next_state, done))
-        
-        if len(self.buffer) == self.n_steps:
-            
-            n_step_return = 0
-            for i, (_, _, r, _, d) in enumerate(self.buffer):
-                n_step_return += (self.gamma ** i) * r
-                if d:  
-                    break
-            
-            
-            first_state, first_action = self.buffer[0][:2]
-            last_next_state, last_done = self.buffer[-1][3:]
-            
-            return (first_state, first_action, n_step_return, last_next_state, last_done)
-        
-        return None
-    
-    def clear(self):
-        self.buffer.clear()
+    return loss_value
 
 
 
 
 
 
-
-
-def initialize_enhanced_replay_system():
-    """Initialize the enhanced replay system"""
-    
-    replay_buffer = PrioritizedReplayBuffer(
-        capacity=REPLAY_BUFFER_CAPACITY,
-        alpha=0.6,      
-        beta=0.4,       
-        beta_increment=0.001  
-    )
-    
-    
-    multi_step_buffer = MultiStepBuffer(n_steps=3, gamma=GAMMA)
-    
-    return replay_buffer, multi_step_buffer
-
-
-def store_experience_enhanced(replay_buffer, multi_step_buffer, prev_state, action_idx, reward, next_state, done, events):
-    """Enhanced experience storage with multi-step learning"""
-    
-    
-    experience_bonus = calculate_experience_bonus(events, replay_buffer)
-    enhanced_reward = reward + experience_bonus
-    
-    
-    n_step_transition = multi_step_buffer.add(prev_state, action_idx, enhanced_reward, next_state, done)
-    
-    
-    if n_step_transition is not None:
-        state, action, n_step_return, final_next_state, final_done = n_step_transition
-        replay_buffer.push(state, action, n_step_return, final_next_state, final_done, events)
-    
-    
-    replay_buffer.push(prev_state, action_idx, enhanced_reward, next_state, done, events)
-    
-    
-    if done:
-        multi_step_buffer.clear()
-
-
-
-class AdaptiveTraining:
-    def __init__(self, initial_freq=4, min_freq=1, max_freq=8):
-        self.initial_freq = initial_freq
-        self.min_freq = min_freq
-        self.max_freq = max_freq
-        self.current_freq = initial_freq
-        self.loss_history = deque(maxlen=100)
-    
-    def should_train(self, step_idx):
-        """Decide whether to train based on adaptive frequency"""
-        return step_idx % self.current_freq == 0
-    
-    def update_frequency(self, loss):
-        """Adjust training frequency based on loss"""
-        if loss is not None:
-            self.loss_history.append(loss)
-            
-            if len(self.loss_history) >= 50:
-                recent_loss = np.mean(list(self.loss_history)[-20:])
-                older_loss = np.mean(list(self.loss_history)[-50:-20])
-                
-                
-                if recent_loss < older_loss * 0.9:
-                    self.current_freq = min(self.max_freq, self.current_freq + 1)
-                
-                elif recent_loss > older_loss * 1.1:
-                    self.current_freq = max(self.min_freq, self.current_freq - 1)
-
-
-
-
-
-
-
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print("CODEITERATION11")
-print(f"Using device: {device}")
 
 def check_disk_space(path="."):
     """Check available disk space in GB"""
@@ -525,25 +339,41 @@ transform = transforms.ToTensor()
 frame_cache = {}
 cache_lock = threading.Lock()
 
+# 1. OPTIMIZE FRAME PROCESSING - BIGGEST BOTTLENECK
+
 def segment_frame(model, frame, use_cache=True):
-    """Optimized segmentation with caching"""
+    """Optimized segmentation with better CUDA memory management"""
     frame_hash = hash(frame.tobytes()) if use_cache else None
     
     if use_cache and frame_hash in frame_cache:
         return frame_cache[frame_hash]
     
+    # Pre-allocate on CPU, then move to GPU
     resized = cv2.resize(frame, INPUT_SIZE, interpolation=cv2.INTER_LINEAR)
-    input_tensor = transform(resized).unsqueeze(0).to(device)
     
+    # Use torch.no_grad() and explicit tensor management
     with torch.no_grad():
+        # Create tensor on CPU first
+        input_tensor = transform(resized).unsqueeze(0)
+        
+        # Move to GPU only when needed
+        input_tensor = input_tensor.to(device, non_blocking=True)
+        
+        # Forward pass
         output = model(input_tensor)
+        
+        # Move result back to CPU immediately
         mask = torch.argmax(output.squeeze(), dim=0).cpu().numpy()
+        
+        # Clear GPU tensor immediately
+        del input_tensor, output
     
     result = (mask, resized)
     
     if use_cache:
         with cache_lock:
-            if len(frame_cache) > 10:  
+            # Limit cache size more aggressively
+            if len(frame_cache) > 5:  # Reduced from 10
                 frame_cache.clear()
             frame_cache[frame_hash] = result
     
@@ -690,41 +520,59 @@ def stop_checkpoint_detection_thread():
         checkpoint_detection_thread.join(timeout=1.0)
     print("🛑 Checkpoint detection thread stopped")
 
+
 def checkpoint_detection_worker():
-    """Worker thread for continuous checkpoint monitoring"""
+    """Optimized worker thread for continuous checkpoint monitoring"""
     global checkpoint_detection_active, last_detected_checkpoints
     
-    checkpoint_buffer = deque(maxlen=20)  
+    checkpoint_buffer = deque(maxlen=10)  # Reduced buffer size
+    last_process_time = 0
     
     while checkpoint_detection_active:
-        try:
-            
-            if not checkpoint_detection_queue.empty():
-                checkpoint_data = checkpoint_detection_queue.get_nowait()
-                checkpoint_buffer.append(checkpoint_data)
-                
-                
-                if len(checkpoint_buffer) >= 5:
-                    
-                    coverages = [data['coverage'] for data in checkpoint_buffer]
-                    
-                    
-                    if len(coverages) >= 5:
-                        recent_peak = max(coverages[-5:])
-                        if recent_peak > 0.03:  
-                            
-                            current_coverage = coverages[-1]
-                            if recent_peak - current_coverage > 0.01:  
-                                print(f"🎯 Thread detected checkpoint passage! Peak: {recent_peak:.3f}")
-                                checkpoint_event_queue.put("checkpoint_reached")
-                                
-                                
-                
-        except Exception as e:
-            print(f"Checkpoint detection thread error: {e}")
+        current_time = time.time()
         
-        time.sleep(0.01)  
-
+        # Rate limit processing to reduce CPU load
+        if current_time - last_process_time < 0.2:  # 20 FPS max
+            time.sleep(0.05)
+            continue
+            
+        try:
+            # Process only the most recent data
+            latest_data = None
+            queue_size = 0
+            
+            # Drain queue but keep only latest
+            while not checkpoint_detection_queue.empty():
+                try:
+                    latest_data = checkpoint_detection_queue.get_nowait()
+                    queue_size += 1
+                    if queue_size > 5:  # Skip processing if queue is backing up
+                        break
+                except:
+                    break
+            
+            if latest_data:
+                checkpoint_buffer.append(latest_data)
+                
+                # Simplified detection logic
+                if len(checkpoint_buffer) >= 3:  # Reduced from 5
+                    recent_coverages = [data['coverage'] for data in list(checkpoint_buffer)[-3:]]
+                    max_recent = max(recent_coverages)
+                    
+                    if max_recent > 0.04 and recent_coverages[-1] < max_recent - 0.015:
+                        print(f"🎯 Thread detected checkpoint! Peak: {max_recent:.3f}")
+                        try:
+                            checkpoint_event_queue.put_nowait("checkpoint_reached")
+                        except:
+                            pass  # Queue full, skip
+                        checkpoint_buffer.clear()  # Reset after detection
+                        
+            last_process_time = current_time
+                        
+        except Exception as e:
+            print(f"Checkpoint detection error: {e}")
+        
+        time.sleep(0.05)  # Reduced sleep time but still reasonable
 
 
 def check_checkpoint_timeout(last_checkpoint_time, current_time):
@@ -784,33 +632,33 @@ def detect_track_coverage_crash(mask, threshold=0.2):
         return sustained_crash_detected, crash_penalty_accumulated
 
 def crash_detection_worker(threshold):
-    """Worker thread for crash detection timing"""
+    """Optimized worker thread for crash detection timing"""
     global crash_detection_active, sustained_crash_detected, crash_penalty_accumulated
     
     start_time = time.time()
+    check_interval = 0.5  # Check every 100ms instead of 50ms
     
     while True:
         with crash_detection_lock:
             if not crash_detection_active:
                 break
+                
         elapsed_time = time.time() - start_time
         
-        
-        if elapsed_time >= 0.3 and crash_penalty_accumulated == 0:
+        # Apply penalties at specific intervals only
+        if elapsed_time >= 0.5 and crash_penalty_accumulated == 0:
             with crash_detection_lock:
                 crash_penalty_accumulated = -8
-        
-        
-        if elapsed_time >= 2.5:
+                
+        if elapsed_time >= 2.5:  # Reduced from 2.5s
             with crash_detection_lock:
                 sustained_crash_detected = True
-                
-                print(f"🚨 Sustained track coverage crash detected (under {threshold*100:.1f}%) for 1.5s!")
+                print(f"🚨 Sustained crash detected after {elapsed_time:.1f}s!")
                 crash_detection_active = False
-                
                 break
         
-        time.sleep(0.05)
+        time.sleep(check_interval)
+
 
 def enhanced_checkpoint_detection(mask, prev_checkpoint_coverage=0, checkpoint_counter=0, checkpoint_confirmed=False):
     """Enhanced checkpoint detection with progressive rewards"""
@@ -847,7 +695,7 @@ def enhanced_checkpoint_detection(mask, prev_checkpoint_coverage=0, checkpoint_c
 
 
 
-similarity_history = deque(maxlen=10)  
+similarity_history = deque(maxlen=7)  
 
 def detect_events(mask, prev_mask, f2, prev_positions, stuck_counter, checkpoint_counter, 
                  checkpoint_confirmed, finish_counter, finish_confirmed, last_checkpoint_time, 
@@ -932,18 +780,21 @@ def detect_events(mask, prev_mask, f2, prev_positions, stuck_counter, checkpoint
     if check_checkpoint_timeout(last_checkpoint_time, current_time):
         events.append("checkpoint_timeout")
 
-    
-    if current_time - last_checkpoint_time > 5 and prev_mask is not None:
-        similarity = np.mean(prev_mask == mask)
-
-        similarity_history.append(similarity > 0.985)
-
-        if similarity_history.count(True) >= 9: 
-            events.append("similarity_crash")
-            events.append("crash")
-            print("💥 Similarity crash detected")
-            similarity_history.clear()  
-
+    # if current_time - last_checkpoint_time > 5 and prev_mask is not None:
+    #     # Use much faster similarity check - only sample pixels
+    #     sample_size = min(1000, mask.size // 100)  # Sample only 1% of pixels
+    #     flat_mask = mask.flatten()
+    #     flat_prev = prev_mask.flatten()
+        
+    #     # Random sampling for speed
+    #     indices = np.random.choice(len(flat_mask), sample_size, replace=False)
+    #     similarity = np.mean(flat_mask[indices] == flat_prev[indices])
+        
+    #     similarity_history.append(similarity > 0.98)
+    #     if len(similarity_history) >= 5 and similarity_history.count(True) >= 4:  # Relaxed threshold
+    #         events.append("similarity_crash")
+    #         print("💥 Similarity crash detected")
+    #         similarity_history.clear()
 
         
         
@@ -987,16 +838,9 @@ def reward_from_events(events, episode_length, max_episode_length, track_directi
     reward = 0
     checkpointhresholdtime = 0.5
     
-    
-    
-    
-    if "finish" in events:
-        reward += 1000
-        print(f"🏆 RACE COMPLETED! +1000")
-        
     if last_checkpoint_time is not None and current_time is not None:
         time_since_last_checkpoint = current_time - last_checkpoint_time
-    
+    # print(time_since_last_checkpoint)
     if time_since_last_checkpoint > 12:
         reward -= 10
     if "finish" in events:
@@ -1036,7 +880,7 @@ def reward_from_events(events, episode_length, max_episode_length, track_directi
 
     
     if "crash" in events:
-        crash_penalty_val = 10 - consecutive_checkpoints * 15
+        crash_penalty_val = 10 - consecutive_checkpoints * 2
         reward -= crash_penalty_val
         print(f"💥 Crash penalty: -{crash_penalty_val}")
         
@@ -1045,12 +889,12 @@ def reward_from_events(events, episode_length, max_episode_length, track_directi
         print(f"💥 Similarity crash penalty: -30")
         
     if "stuck" in events:
-        stuck_penalty = 15 - consecutive_checkpoints * 10
+        stuck_penalty = 15 - consecutive_checkpoints * 3
         reward -= stuck_penalty
         print(f"🚫 Stuck penalty: -{stuck_penalty}")
     
     if "out_of_bounds" in events:
-        oob_penalty = 40 - consecutive_checkpoints * 10
+        oob_penalty = 7 - consecutive_checkpoints
         reward -= oob_penalty
         print(f"🚫 Out of bounds penalty: -{oob_penalty}")
     
@@ -1073,72 +917,49 @@ def reward_from_events(events, episode_length, max_episode_length, track_directi
     print(f"📊 Total reward: {reward:.2f}")
     return reward
 
-
 class QNetwork(nn.Module):
-    def __init__(self, input_shape, num_actions):
+    def __init__(self, input_channels=3, num_actions=4):
         super(QNetwork, self).__init__()
-        c, h, w = input_shape
         
+        # Simple CNN
+        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
         
-        self.conv = nn.Sequential(
-            nn.Conv2d(c, 32, kernel_size=8, stride=4, padding=2),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=6, stride=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-        )
+        # Calculate the size of flattened features
+        conv_out_size = self._get_conv_out_size(input_channels, INPUT_SIZE[0], INPUT_SIZE[1])
         
+        # Fully connected layers
+        self.fc1 = nn.Linear(conv_out_size, 512)
+        self.fc2 = nn.Linear(512, num_actions)
         
+    def _get_conv_out_size(self, channels, height, width):
         with torch.no_grad():
-            dummy_input = torch.zeros(1, c, h, w)
-            conv_output = self.conv(dummy_input)
-            linear_input_size = conv_output.view(1, -1).size(1)
-        
-        
-        self.fc = nn.Sequential(
-            nn.Dropout(0.1),
-            nn.Linear(linear_input_size, 1024),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(1024, 512),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, num_actions)
-        )
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = x.view(x.size(0), -1)
-        return self.fc(x)
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = x.view(x.size(0), -1)
-        return self.fc(x)
+            x = torch.zeros(1, channels, height, width)
+            x = F.relu(self.conv1(x))
+            x = F.relu(self.conv2(x))
+            x = F.relu(self.conv3(x))
+            return int(np.prod(x.size()))
     
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)
+
 def press_action(action_idx):
     """Queue action for the dedicated control thread"""
     global action_queue
-    
+
     try:
-        
-        while not action_queue.empty():
-            try:
-                action_queue.get_nowait()
-                action_queue.task_done()
-            except:
-                break
-        
-        action_queue.put(action_idx.copy())
+        # Clear old actions
+        with action_queue.mutex:
+            action_queue.queue.clear()
+
+        # Add new one
+        action_queue.put_nowait(action_idx.copy())
     except Exception as e:
         print(f"Error queuing action: {e}")
 
@@ -1148,6 +969,7 @@ def release_all_keys():
 
 def restart_track():
     print("🔄 Restarting track...")
+    clear_cuda_cache()
     global crash_detection_active, sustained_crash_detected
     with crash_detection_lock:
         crash_detection_active = False
@@ -1176,73 +998,75 @@ def restart_track():
     
     
     force_release_all_keys()
+    clear_cuda_cache()
     time.sleep(2)
-
 def select_action(q_net, state, epsilon, track_direction):
-    """Select action using epsilon-greedy with track direction bias"""
+    """Optimized action selection with better tensor management"""
     if random.random() < epsilon:
-        # Random action with some bias towards forward movement
-        action = [0, 0, 0, 0]  # [left, right, forward, backward]
-        
-        # Always tend to go forward
+        # Random action logic (unchanged)
+        action = [0, 0, 0, 0]
         if random.random() < 0.7:
-            action[2] = 1  # forward
+            action[2] = 1
         elif random.random() < 0.1:
-            action[3] = 1  # bac
+            action[3] = 1
         
-        # Turn based on track direction
-        if track_direction > 0.3:  # track curves right
+        if track_direction > 0.3:
             if random.random() < 0.2:
-                action[1] = 1  # right
-        elif track_direction < -0.3:  # track curves left
+                action[1] = 1
+        elif track_direction < -0.3:
             if random.random() < 0.2:
-                action[0] = 1  # left
+                action[0] = 1
         else:
-            # Slight random turning
             if random.random() < 0.2:
                 action[random.choice([0, 1])] = 1
         
         return action
     else:
-        # Use Q-network
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+        # Optimized Q-network inference
         with torch.no_grad():
+            # Create tensor on CPU, then move to GPU
+            state_tensor = torch.FloatTensor(state).unsqueeze(0)
+            state_tensor = state_tensor.to(device, non_blocking=True)
+            
+            # Forward pass
             q_values = q_net(state_tensor)
-            # Convert Q-values to probabilities using sigmoid
             action_probs = torch.sigmoid(q_values.squeeze())
-
-            # Extract individual action probabilities
-            left_prob = action_probs[0].item()
-            right_prob = action_probs[1].item()
-
-            # Default thresholded actions
-            action = [0] * len(action_probs)
-
-            # Handle turning logic (assuming index 0 = left, 1 = right)
+            
+            # Move back to CPU for processing
+            action_probs_cpu = action_probs.cpu()
+            
+            # Clear GPU tensors immediately
+            del state_tensor, q_values, action_probs
+            
+            # Process on CPU
+            action = [0] * 4
+            
+            # Your existing action logic using action_probs_cpu
+            left_prob = action_probs_cpu[0].item()
+            right_prob = action_probs_cpu[1].item()
+            
             if left_prob > 0.98 and right_prob > 0.98:
                 if left_prob > right_prob:
-                    action[0] = 1  # turn left
+                    action[0] = 1
                 else:
-                    action[1] = 1  # turn right
+                    action[1] = 1
             else:
                 if left_prob > 0.98:
                     action[0] = 1
                 if right_prob > 0.98:
                     action[1] = 1
-            # Handle W and S first (indexes 0 and 1 assumed)
-            w_prob = action_probs[0]
-            s_prob = action_probs[1]
-
+            
+            w_prob = action_probs_cpu[2] if len(action_probs_cpu) > 2 else 0
+            s_prob = action_probs_cpu[3] if len(action_probs_cpu) > 3 else 0
+            
             if w_prob > 0.98 or s_prob > 0.98:
                 if w_prob > s_prob:
-                    action[0] = 1  # Press W
+                    action[2] = 1
                 else:
-                    action[1] = 1  # Press S
-
-
-            print(action_probs)
-            print(action)
-        return action
+                    action[3] = 1
+            
+            del action_probs_cpu
+            return action
 
     
 def preprocess_frame(frame):
@@ -1260,27 +1084,78 @@ def initialize_checkpoint_detection():
     start_checkpoint_detection_thread()
     return checkpoint_history_buffer
 
+class SimpleReplayBuffer:
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    def push(self, state, action, reward, next_state, done):
+        # Store on CPU to save GPU memory
+        self.buffer.append((
+            state if isinstance(state, np.ndarray) else np.array(state),
+            action if isinstance(action, np.ndarray) else np.array(action),
+            float(reward),
+            next_state if isinstance(next_state, np.ndarray) else np.array(next_state),
+            bool(done)
+        ))
+    def __len__(self):
+        return len(self.buffer) 
+    def sample(self, batch_size):
+        if len(self.buffer) < batch_size:
+            return None
+        
+        batch = random.sample(self.buffer, batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
+        
+        return (
+            np.array(states, dtype=np.float32),
+            np.array(actions, dtype=np.float32),
+            np.array(rewards, dtype=np.float32),
+            np.array(next_states, dtype=np.float32),
+            np.array(dones, dtype=bool)
+        )
+    
+
 def main():
     free_space = check_disk_space()
     print(f"💾 Available disk space: {free_space:.2f}GB")
     reward_history = []
-
+    torch.backends.cudnn.benchmark = True  # Optimize for consistent input sizes
+    torch.backends.cuda.matmul.allow_tf32 = True  # Use TF32 for faster training
     if free_space < MIN_FREE_SPACE_GB * 2:  
         print("⚠️ Warning: Low disk space! Consider freeing up space before training.")
         cleanup_old_checkpoints()
     
     print("🔧 Loading segmentation model...")
+
+
+
     seg_model = load_segmentation_model(MODEL_PATH)
     start_control_thread()
     checkpoint_history_buffer = initialize_checkpoint_detection()
-    q_net = QNetwork((3, INPUT_SIZE[0], INPUT_SIZE[1]), NUM_ACTIONS).to(device)  
-    target_net = QNetwork((3, INPUT_SIZE[0], INPUT_SIZE[1]), NUM_ACTIONS).to(device)
+    
+
+    # Initialize networks
+    q_net = QNetwork(input_channels=3, num_actions=NUM_ACTIONS).to(device)
+    target_net = QNetwork(input_channels=3, num_actions=NUM_ACTIONS).to(device)
     target_net.load_state_dict(q_net.state_dict())
     target_net.eval()
-
-    optimizer = optim.Adam(q_net.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
-    replay_buffer, multi_step_buffer = initialize_enhanced_replay_system()
-    adaptive_trainer = AdaptiveTraining()
+    
+    # Enable optimizations
+    # if device.type == 'cuda':
+    #     q_net = q_net.half()
+    #     target_net = target_net.half()
+    
+    # Compile networks
+    # try:
+    #     q_net = torch.compile(q_net, mode='reduce-overhead')
+    #     target_net = torch.compile(target_net, mode='reduce-overhead')
+    #     print("✅ Networks compiled for optimization")
+    # except:
+    #     print("⚠️ Network compilation not available")
+    
+    optimizer = optim.AdamW(q_net.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+    replay_buffer = SimpleReplayBuffer(REPLAY_BUFFER_CAPACITY)
 
     epsilon = EPSILON_START
     step_idx = 0
@@ -1294,12 +1169,11 @@ def main():
     with mss.mss() as sct:
         try:
             for episode in range(total_episodes):
-                events = []
                 episode_reward = 0
                 episode_length = 0
                 episode_start_time = time.time()
-                reward = 0
-                crash_penalty = 0
+                
+                # Initialize episode variables
                 prev_positions = deque(maxlen=STUCK_THRESHOLD)
                 stuck_counter = 0
                 checkpoint_counter = 0
@@ -1309,27 +1183,38 @@ def main():
                 frame_count = 0
                 consecutive_checkpoints = 0
                 max_consecutive_checkpoints = 0
-                print(f"\n🚗 Starting Episode {episode + 1}/{total_episodes} (ε={epsilon:.3f})")
                 prev_checkpoint_coverage = 0
                 current_checkpoint_coverage = 0
                 prev_frame = None
                 prev_car_pos = None
-                prev_action_idx = None
-                last_checkpoint_time = time.time()  
+                last_checkpoint_time = time.time()
                 last_checkpoint_reach_time = time.time()
+                
+                # FIXED: Initialize state variables for replay buffer
+                prev_state = None
+                prev_action = None
+                
+                print(f"\n🚗 Starting Episode {episode + 1}/{total_episodes} (ε={epsilon:.3f})")
+                
                 while True:
-                    time.sleep(0.1)
                     current_time = time.time()
+                    time.sleep(0.1)
+                    # Episode timeout check
                     if current_time - episode_start_time > EPISODE_TIMEOUT:
-                        print("⏰ Episode timeout - restarting track")
+                        print("⏰ Episode timeout - ending episode")
                         episode_reward -= 100
-                        restart_track()
                         break
-                    if episode_length % 100 == 0:
+                    
+                    # Periodic key release to prevent stuck keys
+                    if episode_length % 20 == 0:
                         force_release_all_keys()
+                        clear_cuda_cache()
                         time.sleep(0.005)
+                    
                     frame_count += 1
+                    
                     try:
+                        # Capture frame
                         sct_img = sct.grab(monitor)
                         frame = np.array(sct_img)[..., :3]
                         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -1343,25 +1228,21 @@ def main():
                             if state is None or np.isnan(state).any():
                                 raise ValueError("Invalid state after preprocessing")
                         except Exception as e:
+                            print(f"Segmentation error: {e}")
                             continue
 
+                        # Calculate game state information
                         track_direction = calculate_track_direction(mask)
-                        
-                        
                         car_mask = (mask == LABEL_CAR)
                         car_center = get_centroid(car_mask)
                         car_speed = calculate_car_speed(car_center, prev_car_pos) if prev_car_pos else 0
                         
-                        checkpoint_mask = (mask == LABEL_CHECKPOINT)
-                        finish_mask = (mask == LABEL_FINISH)
-                        current_progress = calculate_progress(car_center, checkpoint_mask, finish_mask)
-                        
-                        
+                        # Select and execute action
                         action_idx = select_action(q_net, state, epsilon, track_direction)
-
                         press_action(action_idx)
-
-                        time.sleep(0.005)  
+                        time.sleep(0.005)
+                        
+                        # Capture next frame
                         sct_img_next = sct.grab(monitor)
                         frame_next = np.array(sct_img_next)[..., :3]
                         frame_next = cv2.cvtColor(frame_next, cv2.COLOR_BGR2RGB)
@@ -1370,71 +1251,56 @@ def main():
                             mask_next, resized_frame_next = segment_frame(seg_model, frame_next)
                             next_state = preprocess_frame(resized_frame_next)
                         except Exception as e:
+                            print(f"Next frame segmentation error: {e}")
                             continue
                         
-                        done = False
                         reward = 0
                         events = []
-
+                        
+                        # Event detection and reward calculation
                         if prev_frame is not None:
-                            
                             events, stuck_counter, checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed, last_checkpoint_time, current_checkpoint_coverage, crash_penalty = detect_events(
                                 mask_next, prev_mask, frame_next, prev_positions, stuck_counter, 
                                 checkpoint_counter, checkpoint_confirmed, finish_counter, finish_confirmed, 
                                 last_checkpoint_time, current_time, prev_checkpoint_coverage, checkpoint_history_buffer)
 
                             reward = reward_from_events(
-                                    events, episode_length, EPISODE_TIMEOUT * 60, track_direction, 
-                                    current_checkpoint_coverage, prev_checkpoint_coverage, car_speed, 
-                                    consecutive_checkpoints, car_center, mask_next, 
-                                    current_time, crash_penalty, last_checkpoint_time
-                                )
+                                events, episode_length, EPISODE_TIMEOUT * 60, track_direction, 
+                                current_checkpoint_coverage, prev_checkpoint_coverage, car_speed, 
+                                consecutive_checkpoints, car_center, mask_next, 
+                                current_time, crash_penalty, last_checkpoint_time
+                            )
                             
-      
-                            
-                            
-                            resized_prev_frame = cv2.resize(prev_frame, INPUT_SIZE)
-                            prev_state = preprocess_frame(resized_prev_frame)
-                            
-
-                            
-                            done = "finish" in events or "crash" in events
-                            
-                            store_experience_enhanced(replay_buffer, multi_step_buffer, prev_state, action_idx, reward, next_state, done, events)
-
-                            if adaptive_trainer.should_train(step_idx):
-                                loss = train_step_prioritized(q_net, target_net, optimizer, replay_buffer)
-                                adaptive_trainer.update_frequency(loss)
-                            
-                            episode_reward += reward
-                            reward_history.append(reward)
-
-
-
-
-
-
-
-                        if step_idx % TARGET_UPDATE_FREQ == 0:
-                            target_net.load_state_dict(q_net.state_dict())
-
-                        if epsilon > EPSILON_END:
-                            epsilon -= (EPSILON_START - EPSILON_END) / EPSILON_DECAY
-
-                        prev_frame = frame_next.copy()
-                        prev_action_idx = action_idx.copy()
-                        prev_mask = mask_next.copy()
-                        prev_checkpoint_coverage = current_checkpoint_coverage
-
-                        if finish_counter > 0 and not finish_confirmed and episode_length % 30 == 0:
-                            progress = (finish_counter / FINISH_CONFIRM_FRAMES) * 100
-                            print(f"🏁 Finish line: {progress:.1f}%")
+                            # FIXED: Store experience in replay buffer with correct variables
+                            if prev_state is not None and prev_action is not None:
+                                # Determine if this is a terminal state
+                                done = "finish" in events
+                                
+                                # Add experience to replay buffer
+                                replay_buffer.push(prev_state, prev_action, reward, state, done)
+                                
+                                # Train the network
+                                if len(replay_buffer) > BATCH_SIZE and step_idx % TRAIN_FREQUENCY == 0:
+                                    loss = train_dqn(q_net, target_net, optimizer, replay_buffer)
+                                    if loss is not None and step_idx % 100 == 0:
+                                        print(f"📈 Training loss: {loss:.4f}")
                         
-                        if "finish" in events:
-                            print(f"🏁 Track completed! Reward: {episode_reward:.2f}")
-                            done = True
+                        # Update episode statistics
+                        episode_reward += reward
+                        reward_history.append(reward)
+                        
+                        # Handle different events
+                        if "checkpoint" in events:
+                            consecutive_checkpoints += 1
+                            max_consecutive_checkpoints = max(max_consecutive_checkpoints, consecutive_checkpoints)
+                            last_checkpoint_time = time.time()
+                            print(f"✅ Checkpoint! Total checkpoints: {consecutive_checkpoints}, Reward: {reward:.1f}")
+                        
+                        # FIXED: Proper crash handling - restart but continue episode
                         if "crash" in events or "stuck" in events or stuck_counter > STUCK_THRESHOLD:
                             print(f"💥 {'Crash' if 'crash' in events else 'Stuck'} detected - restarting track")
+                            target_net.load_state_dict(q_net.state_dict())
+                            time.sleep(2)
                             restart_track()
                             consecutive_checkpoints = 0
                             max_consecutive_checkpoints = 0
@@ -1448,65 +1314,68 @@ def main():
                             # Clear frame cache and wait a moment
                             prev_frame = None
                             prev_mask = None
+                            
                             print(f"🔄 Target network updated at step {step_idx} Epsilon: {epsilon}")
-
                             continue  # Continue the episode, don't break
                         
-                        if "checkpoint" in events:
-                            consecutive_checkpoints += 1
-                            max_consecutive_checkpoints = max(max_consecutive_checkpoints, consecutive_checkpoints)
-                            last_checkpoint_time = time.time()  
-                            print(f"✅ Checkpoint! Reward: {reward:.1f}")
-
-
-
-
-                        if step_idx % TARGET_UPDATE_FREQ == 0:
-                            target_net.load_state_dict(q_net.state_dict())
-                            print(f"🔄 Target network updated at step {step_idx}")
-
-                        step_idx += 1
-                        episode_length += 1
+                        # Handle race finish
+                        if "finish" in events:
+                            print(f"🏁 Race completed! Episode reward: {episode_reward:.2f}")
+                            break  # End episode on finish
+                        
+                        # Update target network periodically
+                        # if step_idx % TARGET_UPDATE_FREQ == 0:
+                        #     target_net.load_state_dict(q_net.state_dict())
+                        #     print(f"🔄 Target network updated at step {step_idx}")
+                        
+                        # Decay epsilon
+                        if epsilon > EPSILON_END:
+                            epsilon -= (EPSILON_START - EPSILON_END) / EPSILON_DECAY
+                        
+                        # Update state variables for next iteration
+                        prev_state = state
+                        prev_action = action_idx
                         prev_frame = frame_next.copy()
                         prev_car_pos = car_center
-                        prev_action_idx = action_idx.copy()
-
-                        if done:
-                            last_checkpoint_time = time.time()  
-                            break
+                        prev_mask = mask_next.copy()
+                        prev_checkpoint_coverage = current_checkpoint_coverage
+                        
+                        step_idx += 1
+                        episode_length += 1
 
                     except Exception as e:
+                        print(f"Frame processing error: {e}")
                         continue
 
-                print(f"📊 Episode {episode + 1} - Reward: {episode_reward:.2f}, Steps: {episode_length}, ε: {epsilon:.3f}, Avg Reward/Step: {episode_reward/max(1, episode_length):.2f}")
+                print(f"📊 Episode {episode + 1} - Reward: {episode_reward:.2f}, Steps: {episode_length}, ε: {epsilon:.3f}, Max Checkpoints: {max_consecutive_checkpoints}")
                 
-                
+                # Save checkpoint periodically
                 if (episode + 1) % CHECKPOINT_SAVE_FREQUENCY == 0:
                     checkpoint_filename = f"trackmania_dqn_checkpoint_{episode + 1}.pth"
                     if safe_save_model(q_net.state_dict(), checkpoint_filename):
-                        
                         cleanup_old_checkpoints()
                     
-                    
+                    # Clear frame cache
                     with cache_lock:
                         frame_cache.clear()
 
             print("🎉 Training completed!")
             
-            
+            # Save final model
             if not safe_save_model(q_net.state_dict(), "trackmania_dqn_final_optimized.pth"):
                 print("⚠️ Could not save final model due to disk space issues")
 
         except KeyboardInterrupt:
             print("🛑 Training interrupted by user.")
         finally:
+            # Cleanup
             with crash_detection_lock:
                 crash_detection_active = False
-            stop_checkpoint_detection_thread()  
-            stop_control_thread_func()  
-            release_all_keys()
+            stop_checkpoint_detection_thread()
+            stop_control_thread_func()
             release_all_keys()
             
+            # Plot reward history
             plt.figure(figsize=(10, 4))
             plt.plot(reward_history, label="Reward per frame")
             plt.xlabel("Timestep / Frame")
