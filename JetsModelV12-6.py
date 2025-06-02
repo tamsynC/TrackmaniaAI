@@ -57,10 +57,10 @@ REPLAY_BUFFER_CAPACITY = 5500
 TARGET_UPDATE_FREQ = 100  
 EPSILON_START = 1.0
 EPSILON_END = 0.03
-EPSILON_DECAY = 15000
+EPSILON_DECAY = 10000
 
 
-EPISODE_TIMEOUT = 300
+EPISODE_TIMEOUT = 400
 CRASH_THRESHOLD = 0.87
 STUCK_THRESHOLD = 10
 CHECKPOINT_CONFIRM_FRAMES = 2
@@ -181,40 +181,58 @@ def stop_control_thread_func():
     print("🛑 Control thread stopped")
 
 def control_thread_worker():
-    """Dedicated thread for handling WASD controls"""
+    """Dedicated thread for handling WASD controls with short tap behavior"""
     global stop_control_thread, current_action
-    
+
+    prev_action_state = [False] * len(ACTIONS)
+
     while not stop_control_thread:
         try:
-            
+            # Get new action if available
             try:
                 new_action = action_queue.get_nowait()
                 with action_lock:
                     current_action = new_action
                 action_queue.task_done()
             except:
-                pass  
-            
-            
+                pass
+
+            # Copy current action
             with action_lock:
                 action_to_execute = current_action.copy()
-            
-            
+
+            # Only tap keys that are newly activated
             for i, should_press in enumerate(action_to_execute):
-                
-                if should_press:
-                    keyboard.press(ACTIONS[i])
-                else:
-                    keyboard.release(ACTIONS[i])
-            
-            time.sleep(0.1)  
-            
+                key = ACTIONS[i]
+                if key == "w":
+                    if should_press and not prev_action_state[i]:
+                        keyboard.press(key)
+                        time.sleep(0.5)  # 10ms tap
+                        keyboard.release(key)
+                        prev_action_state[i] = True
+                    elif not should_press and prev_action_state[i]:
+                        # Mark as released, no need to press again
+                        prev_action_state[i] = False
+
+
+                elif should_press and not prev_action_state[i]:
+                    keyboard.press(key)
+                    time.sleep(0.15)  # 10ms tap
+                    keyboard.release(key)
+                    prev_action_state[i] = True
+                elif not should_press and prev_action_state[i]:
+                    # Mark as released, no need to press again
+                    prev_action_state[i] = False
+
+            # Small sleep to avoid tight loop hogging CPU
+            time.sleep(0.001)
+
         except Exception as e:
             print(f"Control thread error: {e}")
             time.sleep(0.1)
-    
-    
+
     force_release_all_keys()
+
 
 def force_release_all_keys():
     """Force release all keys using Windows API"""
@@ -507,7 +525,7 @@ transform = transforms.ToTensor()
 frame_cache = {}
 cache_lock = threading.Lock()
 
-def segment_frame(model, frame, use_cache=False):
+def segment_frame(model, frame, use_cache=True):
     """Optimized segmentation with caching"""
     frame_hash = hash(frame.tobytes()) if use_cache else None
     
@@ -1018,7 +1036,7 @@ def reward_from_events(events, episode_length, max_episode_length, track_directi
 
     
     if "crash" in events:
-        crash_penalty_val = 70 - consecutive_checkpoints * 15
+        crash_penalty_val = 10 - consecutive_checkpoints * 15
         reward -= crash_penalty_val
         print(f"💥 Crash penalty: -{crash_penalty_val}")
         
@@ -1027,7 +1045,7 @@ def reward_from_events(events, episode_length, max_episode_length, track_directi
         print(f"💥 Similarity crash penalty: -30")
         
     if "stuck" in events:
-        stuck_penalty = 30 - consecutive_checkpoints * 10
+        stuck_penalty = 15 - consecutive_checkpoints * 10
         reward -= stuck_penalty
         print(f"🚫 Stuck penalty: -{stuck_penalty}")
     
@@ -1042,7 +1060,7 @@ def reward_from_events(events, episode_length, max_episode_length, track_directi
 
     
     if track_direction > -0.7 and track_direction < 0.7:
-        direction_reward = 5 - (abs(track_direction) * 2)
+        direction_reward = 5 - (abs(track_direction) * 4)
         reward += direction_reward
     
     
@@ -1160,62 +1178,71 @@ def restart_track():
     force_release_all_keys()
     time.sleep(2)
 
-def select_action(q_net, state, epsilon, track_direction, device='cuda'):
+def select_action(q_net, state, epsilon, track_direction):
+    """Select action using epsilon-greedy with track direction bias"""
     if random.random() < epsilon:
-        action_idx = [0, 0, 0, 0]
-        r = 0.2 
-
-        if random.random() < 0.02:
-            return [random.randint(0, 1) for _ in range(4)]
-
-
-        turn_prob = min(max(abs(track_direction), 0.1), 0.4)  
-
-        if track_direction > 0.2:  
-            if random.random() < turn_prob:
-                action_idx[1] = 1  
-            elif random.random() < r:
-                action_idx[0] = 1
-        elif track_direction < -0.2:  
-            if random.random() < turn_prob:
-                action_idx[0] = 1  
-            elif random.random() < r:
-                action_idx[1] = 1
-        else:
-            turn_decision = random.random()
-            if turn_decision < r/2:
-                action_idx[random.choice([0, 1])] = 1
-
-
-
+        # Random action with some bias towards forward movement
+        action = [0, 0, 0, 0]  # [left, right, forward, backward]
         
-        if random.random() < 0.9:
-            action_idx[2] = 1  
+        # Always tend to go forward
+        if random.random() < 0.7:
+            action[2] = 1  # forward
         elif random.random() < 0.1:
-            action_idx[3] = 1  
-
+            action[3] = 1  # bac
         
-        if random.random() < 0.2:
-            return [0, 0, 0, 0]
+        # Turn based on track direction
+        if track_direction > 0.3:  # track curves right
+            if random.random() < 0.2:
+                action[1] = 1  # right
+        elif track_direction < -0.3:  # track curves left
+            if random.random() < 0.2:
+                action[0] = 1  # left
+        else:
+            # Slight random turning
+            if random.random() < 0.2:
+                action[random.choice([0, 1])] = 1
         
-
-        return action_idx
-
+        return action
     else:
-        state_t = torch.FloatTensor(state).unsqueeze(0).to(device)
+        # Use Q-network
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
         with torch.no_grad():
-            q_values = q_net(state_t)
+            q_values = q_net(state_tensor)
+            # Convert Q-values to probabilities using sigmoid
             action_probs = torch.sigmoid(q_values.squeeze())
 
-            action_idx = [
-                int(action_probs[0].item() > 0.5),  
-                int(action_probs[1].item() > 0.5),  
-                int(action_probs[2].item() > 0.4),  
-                int(action_probs[3].item() > 0.6),  
-            ]
+            # Extract individual action probabilities
+            left_prob = action_probs[0].item()
+            right_prob = action_probs[1].item()
 
-        return action_idx
+            # Default thresholded actions
+            action = [0] * len(action_probs)
 
+            # Handle turning logic (assuming index 0 = left, 1 = right)
+            if left_prob > 0.98 and right_prob > 0.98:
+                if left_prob > right_prob:
+                    action[0] = 1  # turn left
+                else:
+                    action[1] = 1  # turn right
+            else:
+                if left_prob > 0.98:
+                    action[0] = 1
+                if right_prob > 0.98:
+                    action[1] = 1
+            # Handle W and S first (indexes 0 and 1 assumed)
+            w_prob = action_probs[0]
+            s_prob = action_probs[1]
+
+            if w_prob > 0.98 or s_prob > 0.98:
+                if w_prob > s_prob:
+                    action[0] = 1  # Press W
+                else:
+                    action[1] = 1  # Press S
+
+
+            print(action_probs)
+            print(action)
+        return action
 
     
 def preprocess_frame(frame):
@@ -1256,7 +1283,6 @@ def main():
     adaptive_trainer = AdaptiveTraining()
 
     epsilon = EPSILON_START
-    epsilon_decay_step = 0.00005
     step_idx = 0
 
     monitor = find_trackmania_window()
@@ -1295,7 +1321,7 @@ def main():
                     current_time = time.time()
                     if current_time - episode_start_time > EPISODE_TIMEOUT:
                         print("⏰ Episode timeout - restarting track")
-                        episode_reward -= 500
+                        episode_reward -= 100
                         restart_track()
                         break
                     if episode_length % 100 == 0:
@@ -1421,7 +1447,8 @@ def main():
                             # Clear frame cache and wait a moment
                             prev_frame = None
                             prev_mask = None
-                            time.sleep(2.5)  # Give time for restart
+                            print(f"🔄 Target network updated at step {step_idx} Epsilon: {epsilon}")
+
                             continue  # Continue the episode, don't break
                         
                         if "checkpoint" in events:
