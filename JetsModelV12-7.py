@@ -296,7 +296,9 @@ transform = transforms.ToTensor()
 frame_cache = {}
 cache_lock = threading.Lock()
 
-def segment_frame(model, frame, use_cache=True):
+# 1. OPTIMIZE FRAME PROCESSING - BIGGEST BOTTLENECK
+
+def segment_frame(model, frame, use_cache=False):
     """Optimized segmentation with caching"""
     frame_hash = hash(frame.tobytes()) if use_cache else None
     
@@ -1164,7 +1166,7 @@ def main():
                             checkpoint_confirmed = False
                             finish_counter = 0
                             finish_confirmed = False
-                            
+                            last_checkpoint_time = time.time()
                             # Clear frame cache and wait a moment
                             prev_frame = None
                             prev_mask = None
