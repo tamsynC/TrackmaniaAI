@@ -148,7 +148,15 @@
   </div>
 </section>
 
-
+<style>
+  .fixed-height-img {
+    height: 250px; /* or any height you prefer */
+    width: auto;
+    object-fit: contain; /* or use 'cover' if you want to crop */
+    display: block;
+    margin: 0 auto;
+  }
+</style>
 <section class="hero is-light is-small">
   <div class="hero-body">
     <div class="container">
@@ -156,28 +164,29 @@
       <div id="results-carousel" class="carousel results-carousel">
         <div class="item">
           <img src="./static/images/JetW.jpg"
-            class="teaser-image"
-            alt="Teaser."/>
+               class="fixed-height-img"
+               alt="Jet Webb">
         </div>
-        <div class="item item-chair-tp">
+        <div class="item">
           <img src="./static/images/ConnorW.jpeg"
-            class="teaser-image"
-            alt="Teaser."/>
+               class="fixed-height-img"
+               alt="Connor Williams">
         </div>
-        <div class="item item-fullbody">
+        <div class="item">
           <img src="./static/images/TamsynC.jpeg"
-            class="teaser-image"
-            alt="Teaser."/>
+               class="fixed-height-img"
+               alt="Tamsyn Crangle">
         </div>
-        <div class="item item-shiba">
+        <div class="item">
           <img src="./static/images/NicolasY.jpeg"
-            class="teaser-image"
-            alt="Teaser."/>
+               class="fixed-height-img"
+               alt="Nicolas Yuen">
         </div>
       </div>
     </div>
   </div>
 </section>
+
 
 
 <section class="section">
