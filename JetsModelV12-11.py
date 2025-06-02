@@ -59,7 +59,7 @@ MIN_REPLAY_SIZE = 10000
 TARGET_UPDATE_FREQ = 100  
 EPSILON_START = 0.95
 EPSILON_END = 0.07
-EPSILON_DECAY = 15000
+EPSILON_DECAY = 20000
 
 
 EPISODE_TIMEOUT = 150
@@ -997,46 +997,32 @@ class QNetwork(nn.Module):
         super(QNetwork, self).__init__()
         c, h, w = input_shape
         
-        
+        # More gradual feature extraction
         self.conv = nn.Sequential(
             nn.Conv2d(c, 32, kernel_size=8, stride=4, padding=2),
-            nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=6, stride=3, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(128),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
         )
         
-        
+        # Calculate conv output size
         with torch.no_grad():
             dummy_input = torch.zeros(1, c, h, w)
             conv_output = self.conv(dummy_input)
             linear_input_size = conv_output.view(1, -1).size(1)
         
-        
+        # Simpler, more stable fully connected layers
         self.fc = nn.Sequential(
-            nn.Dropout(0.1),
-            nn.Linear(linear_input_size, 1024),
+            nn.Linear(linear_input_size, 512),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(1024, 512),
-            nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.2),
             nn.Linear(512, 256),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(256, num_actions)
         )
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = x.view(x.size(0), -1)
-        return self.fc(x)
 
     def forward(self, x):
         x = self.conv(x)
