@@ -53,13 +53,13 @@ LABEL_FINISH = 3
 
 BATCH_SIZE = 64  
 GAMMA = 0.99
-LEARNING_RATE = 5e-4
+LEARNING_RATE = 5e-5
 REPLAY_BUFFER_CAPACITY = 50000
 MIN_REPLAY_SIZE = 10000
 TARGET_UPDATE_FREQ = 100  
 EPSILON_START = 0.95
-EPSILON_END = 0.07
-EPSILON_DECAY = 5000
+EPSILON_END = 0.05
+EPSILON_DECAY = 30000
 
 
 EPISODE_TIMEOUT = 150
@@ -814,11 +814,11 @@ def crash_detection_worker(threshold):
         elapsed_time = time.time() - start_time
         
         # Apply penalties at specific intervals only
-        if elapsed_time >= 0.5 and crash_penalty_accumulated == 0:
+        if elapsed_time >= 0.7 and crash_penalty_accumulated == 0:
             with crash_detection_lock:
                 crash_penalty_accumulated = -8
                 
-        if elapsed_time >= 2.5:  # Reduced from 2.5s
+        if elapsed_time >= 4.5:  # Reduced from 2.5s
             with crash_detection_lock:
                 sustained_crash_detected = True
                 print(f"🚨 Sustained crash detected after {elapsed_time:.1f}s!")
@@ -1310,7 +1310,7 @@ def main():
     target_net.load_state_dict(q_net.state_dict())
     target_net.eval()
 
-    optimizer = optim.Adam(q_net.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
+    optimizer = optim.Adam(q_net.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
     replay_buffer, multi_step_buffer = initialize_enhanced_replay_system()
     adaptive_trainer = AdaptiveTraining()
     epsilon = EPSILON_START
