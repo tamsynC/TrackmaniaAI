@@ -37,7 +37,7 @@ os.environ["TMP"] = "F:/temp"
 
 MODEL_PATH = 'unet_model.pth'
 NUM_CLASSES = 5
-INPUT_SIZE = (512, 512)
+INPUT_SIZE = (256, 256)
 
 ACTIONS = ['a', 'd', 'w', 's']
 ACTION_INDEX = [0, 1, 2, 3]
@@ -185,6 +185,137 @@ def control_thread_worker():
     force_release_all_keys()
 
 
+def calculate_experience_bonus(events, replay_buffer):
+    """Give bonus for rare/important experiences"""
+    bonus = 0
+    
+    
+    if len(replay_buffer) > 1000:
+        recent_experiences = list(replay_buffer.buffer)[-1000:]  
+        
+        checkpoint_count = sum(1 for exp in recent_experiences if exp[5] and "checkpoint" in exp[5])
+        finish_count = sum(1 for exp in recent_experiences if exp[5] and "finish" in exp[5])
+        
+        
+        if "checkpoint" in events:
+            rarity_bonus = max(0, 100 - checkpoint_count * 10)  
+            bonus += rarity_bonus
+            
+        if "finish" in events:
+            rarity_bonus = max(0, 500 - finish_count * 50)  
+            bonus += rarity_bonus
+    
+    return bonus
+
+
+class MultiStepBuffer:
+    def __init__(self, n_steps=3, gamma=0.99):
+        self.n_steps = n_steps
+        self.gamma = gamma
+        self.buffer = deque(maxlen=n_steps)
+    
+    def add(self, state, action, reward, next_state, done):
+        """Add transition to n-step buffer"""
+        self.buffer.append((state, action, reward, next_state, done))
+        
+        if len(self.buffer) == self.n_steps:
+            
+            n_step_return = 0
+            for i, (_, _, r, _, d) in enumerate(self.buffer):
+                n_step_return += (self.gamma ** i) * r
+                if d:  
+                    break
+            
+            
+            first_state, first_action = self.buffer[0][:2]
+            last_next_state, last_done = self.buffer[-1][3:]
+            
+            return (first_state, first_action, n_step_return, last_next_state, last_done)
+        
+        return None
+    
+    def clear(self):
+        self.buffer.clear()
+
+
+
+
+
+
+
+
+def initialize_enhanced_replay_system():
+    """Initialize the enhanced replay system"""
+    
+    replay_buffer = PrioritizedReplayBuffer(
+        capacity=REPLAY_BUFFER_CAPACITY,
+        alpha=0.6,      
+        beta=0.4,       
+        beta_increment=0.001  
+    )
+    
+    
+    multi_step_buffer = MultiStepBuffer(n_steps=3, gamma=GAMMA)
+    
+    return replay_buffer, multi_step_buffer
+
+
+def store_experience_enhanced(replay_buffer, multi_step_buffer, prev_state, action_idx, reward, next_state, done, events):
+    """Enhanced experience storage with multi-step learning"""
+    
+    
+    experience_bonus = calculate_experience_bonus(events, replay_buffer)
+    enhanced_reward = reward + experience_bonus
+    
+    
+    n_step_transition = multi_step_buffer.add(prev_state, action_idx, enhanced_reward, next_state, done)
+    
+    
+    if n_step_transition is not None:
+        state, action, n_step_return, final_next_state, final_done = n_step_transition
+        replay_buffer.push(state, action, n_step_return, final_next_state, final_done, events)
+    
+    
+    replay_buffer.push(prev_state, action_idx, enhanced_reward, next_state, done, events)
+    
+    
+    if done:
+        multi_step_buffer.clear()
+
+
+
+class AdaptiveTraining:
+    def __init__(self, initial_freq=4, min_freq=1, max_freq=8):
+        self.initial_freq = initial_freq
+        self.min_freq = min_freq
+        self.max_freq = max_freq
+        self.current_freq = initial_freq
+        self.loss_history = deque(maxlen=100)
+    
+    def should_train(self, step_idx):
+        """Decide whether to train based on adaptive frequency"""
+        return step_idx % self.current_freq == 0
+    
+    def update_frequency(self, loss):
+        """Adjust training frequency based on loss"""
+        if loss is not None:
+            self.loss_history.append(loss)
+            
+            if len(self.loss_history) >= 50:
+                recent_loss = np.mean(list(self.loss_history)[-20:])
+                older_loss = np.mean(list(self.loss_history)[-50:-20])
+                
+                
+                if recent_loss < older_loss * 0.9:
+                    self.current_freq = min(self.max_freq, self.current_freq + 1)
+                
+                elif recent_loss > older_loss * 1.1:
+                    self.current_freq = max(self.min_freq, self.current_freq - 1)
+
+
+
+
+
 
 def force_release_all_keys():
     """Force release all keys using Windows API"""
@@ -196,53 +327,57 @@ def force_release_all_keys():
     time.sleep(0.005)
 
 
-def train_dqn(q_net, target_net, optimizer, replay_buffer):
-    """Optimized DQN training with better memory management"""
-    batch = replay_buffer.sample(BATCH_SIZE)
-    if batch is None:
+def train_step_prioritized(q_net, target_net, optimizer, replay_buffer):
+    """Enhanced training with prioritized experience replay"""
+    if len(replay_buffer) < BATCH_SIZE:
         return None
     
-    states, actions, rewards, next_states, dones = batch
     
-    # Pre-allocate tensors with pinned memory for faster GPU transfer
+    sample_result = replay_buffer.sample(BATCH_SIZE)
+    if sample_result is None:
+        return None
+    
+    states, actions, rewards, next_states, dones, weights, indices = sample_result
+    
+    states_v = torch.FloatTensor(states).to(device)
+    next_states_v = torch.FloatTensor(next_states).to(device)
+    actions_v = torch.FloatTensor(actions).to(device)
+    rewards_v = torch.FloatTensor(rewards).to(device)
+    dones_v = torch.FloatTensor(dones).to(device)
+    weights_v = torch.FloatTensor(weights).to(device)
+    
+    
+    q_values = q_net(states_v)
+    state_action_values = (q_values * actions_v).sum(1)
+    
+    
     with torch.no_grad():
-        states = torch.FloatTensor(states).pin_memory().to(device, non_blocking=True)
-        actions = torch.FloatTensor(actions).pin_memory().to(device, non_blocking=True)
-        rewards = torch.FloatTensor(rewards).pin_memory().to(device, non_blocking=True)
-        next_states = torch.FloatTensor(next_states).pin_memory().to(device, non_blocking=True)
-        dones = torch.BoolTensor(dones).pin_memory().to(device, non_blocking=True)
+        
+        next_q_main = q_net(next_states_v)
+        next_actions = next_q_main.max(1)[1].unsqueeze(1)
+        
+        
+        next_q_target = target_net(next_states_v)
+        next_q_max = next_q_target.gather(1, next_actions).squeeze()
+        
+        expected_q_values = rewards_v + (GAMMA * next_q_max * (1 - dones_v))
     
-    # Current Q values
-    current_q_values = q_net(states)
-    current_q_values = (current_q_values * actions).sum(1)
     
-    # Next Q values with explicit no_grad
-    with torch.no_grad():
-        next_q_values = target_net(next_states).max(1)[0].detach()
-        target_q_values = rewards + (GAMMA * next_q_values * ~dones)
-        target_q_values = target_q_values.detach()
+    td_errors = (expected_q_values - state_action_values).detach().cpu().numpy()
     
-    # Loss calculation
-    loss = F.mse_loss(current_q_values, target_q_values)
     
-    # Optimize with gradient clipping
+    loss = (weights_v * F.smooth_l1_loss(state_action_values, expected_q_values, reduction='none')).mean()
+    
+    
     optimizer.zero_grad()
     loss.backward()
-    torch.nn.utils.clip_grad_norm_(q_net.parameters(), max_norm=1.0)
+    torch.nn.utils.clip_grad_norm_(q_net.parameters(), 1.0)
     optimizer.step()
     
-    # Clear intermediate tensors
-    del states, actions, rewards, next_states, dones
-    del current_q_values, next_q_values, target_q_values
     
-    loss_value = loss.item()
-    del loss
+    replay_buffer.update_priorities(indices, td_errors)
     
-    # Periodic CUDA cache clearing during training
-    if torch.cuda.is_available() and torch.cuda.memory_allocated() > 1e9:  # 1GB
-        torch.cuda.empty_cache()
-    
-    return loss_value
+    return loss.item()
 
 
 
@@ -837,7 +972,11 @@ def reward_from_events(events, episode_length, max_episode_length, track_directi
     
     reward = 0
     checkpointhresholdtime = 0.5
-    
+    # print(car_speed)
+    if car_speed is not None and car_speed < 61:
+        reward -= 5  # Penalize being idle
+        print(f"🐢 Idle penalty applied")
+
     if last_checkpoint_time is not None and current_time is not None:
         time_since_last_checkpoint = current_time - last_checkpoint_time
     # print(time_since_last_checkpoint)
@@ -848,8 +987,8 @@ def reward_from_events(events, episode_length, max_episode_length, track_directi
         print(f"🏆 RACE COMPLETED! +1000")
         
     elif "checkpoint" in events:
-        base_checkpoint_reward = 25
-        consecutive_bonus = consecutive_checkpoints * 25
+        base_checkpoint_reward = 75
+        consecutive_bonus = consecutive_checkpoints * 50
         
         
         time_bonus = 0
@@ -868,7 +1007,7 @@ def reward_from_events(events, episode_length, max_episode_length, track_directi
             time_bonus = 30
             print(f"🏃 FAST! +{time_bonus}")
         elif time_since_last_checkpoint < 6.0:
-            time_bonus = 20
+            time_bonus = 25
             print(f"👍 GOOD TIME! +{time_bonus}")
         else:
             time_bonus = 0
@@ -880,7 +1019,7 @@ def reward_from_events(events, episode_length, max_episode_length, track_directi
 
     
     if "crash" in events:
-        crash_penalty_val = 10 - consecutive_checkpoints * 2
+        crash_penalty_val = 30 - consecutive_checkpoints * 2
         reward -= crash_penalty_val
         print(f"💥 Crash penalty: -{crash_penalty_val}")
         
@@ -913,41 +1052,62 @@ def reward_from_events(events, episode_length, max_episode_length, track_directi
     
     consecutive_bonus = 1 * consecutive_checkpoints
     reward += consecutive_bonus
-    
+    reward = np.clip(reward, -50, 300)
+
     print(f"📊 Total reward: {reward:.2f}")
     return reward
 
 class QNetwork(nn.Module):
-    def __init__(self, input_channels=3, num_actions=4):
+    def __init__(self, input_shape, num_actions):
         super(QNetwork, self).__init__()
+        c, h, w = input_shape
         
-        # Simple CNN
-        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=8, stride=4)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
         
-        # Calculate the size of flattened features
-        conv_out_size = self._get_conv_out_size(input_channels, INPUT_SIZE[0], INPUT_SIZE[1])
+        self.conv = nn.Sequential(
+            nn.Conv2d(c, 32, kernel_size=8, stride=4, padding=2),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=6, stride=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+        )
         
-        # Fully connected layers
-        self.fc1 = nn.Linear(conv_out_size, 512)
-        self.fc2 = nn.Linear(512, num_actions)
         
-    def _get_conv_out_size(self, channels, height, width):
         with torch.no_grad():
-            x = torch.zeros(1, channels, height, width)
-            x = F.relu(self.conv1(x))
-            x = F.relu(self.conv2(x))
-            x = F.relu(self.conv3(x))
-            return int(np.prod(x.size()))
-    
+            dummy_input = torch.zeros(1, c, h, w)
+            conv_output = self.conv(dummy_input)
+            linear_input_size = conv_output.view(1, -1).size(1)
+        
+        
+        self.fc = nn.Sequential(
+            nn.Dropout(0.1),
+            nn.Linear(linear_input_size, 1024),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(1024, 512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, num_actions)
+        )
+
     def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
+        x = self.conv(x)
         x = x.view(x.size(0), -1)
-        x = F.relu(self.fc1(x))
-        return self.fc2(x)
+        return self.fc(x)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = x.view(x.size(0), -1)
+        return self.fc(x)
+    
 
 def press_action(action_idx):
     """Queue action for the dedicated control thread"""
@@ -1084,36 +1244,65 @@ def initialize_checkpoint_detection():
     start_checkpoint_detection_thread()
     return checkpoint_history_buffer
 
-class SimpleReplayBuffer:
-    def __init__(self, capacity):
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity, alpha=0.6, beta=0.4, beta_increment=0.001):
+        self.capacity = capacity
+        self.alpha = alpha  
+        self.beta = beta    
+        self.beta_increment = beta_increment
+        
+
         self.buffer = deque(maxlen=capacity)
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.priorities = deque(maxlen=capacity)
+        self.max_priority = 1.0
+        
+    def push(self, state, action, reward, next_state, done, events=None):
+        """Add experience with maximum priority for new experiences"""
+        experience = (state, action, reward, next_state, done, events)
+        self.buffer.append(experience)
+        self.priorities.append(self.max_priority)
     
-    def push(self, state, action, reward, next_state, done):
-        # Store on CPU to save GPU memory
-        self.buffer.append((
-            state if isinstance(state, np.ndarray) else np.array(state),
-            action if isinstance(action, np.ndarray) else np.array(action),
-            float(reward),
-            next_state if isinstance(next_state, np.ndarray) else np.array(next_state),
-            bool(done)
-        ))
-    def __len__(self):
-        return len(self.buffer) 
     def sample(self, batch_size):
+        """Sample batch with priorities"""
         if len(self.buffer) < batch_size:
             return None
+            
+
+        priorities = np.array(self.priorities)
         
-        batch = random.sample(self.buffer, batch_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
+
+        probs = priorities ** self.alpha
+        probs /= probs.sum()
         
-        return (
-            np.array(states, dtype=np.float32),
-            np.array(actions, dtype=np.float32),
-            np.array(rewards, dtype=np.float32),
-            np.array(next_states, dtype=np.float32),
-            np.array(dones, dtype=bool)
-        )
+
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs, replace=False)
+        
+        
+        experiences = [self.buffer[idx] for idx in indices]
+        states, actions, rewards, next_states, dones, events_list = zip(*experiences)
+        
+        
+        weights = (len(self.buffer) * probs[indices]) ** (-self.beta)
+        weights /= weights.max()  
+        
+        
+        self.beta = min(1.0, self.beta + self.beta_increment)
+        
+        return (np.array(states), np.array(actions), np.array(rewards, dtype=np.float32),
+                np.array(next_states), np.array(dones, dtype=np.uint8), 
+                weights, indices)
+    
+    def update_priorities(self, indices, td_errors):
+        """Update priorities based on TD errors"""
+        for idx, td_error in zip(indices, td_errors):
+            priority = (abs(td_error) + 1e-6) ** self.alpha  
+            if idx < len(self.priorities):
+                self.priorities[idx] = priority
+                self.max_priority = max(self.max_priority, priority)
+    
+    def __len__(self):
+        return len(self.buffer)
+    
     
 
 def main():
@@ -1133,36 +1322,21 @@ def main():
     seg_model = load_segmentation_model(MODEL_PATH)
     start_control_thread()
     checkpoint_history_buffer = initialize_checkpoint_detection()
-    
 
-    # Initialize networks
-    q_net = QNetwork(input_channels=3, num_actions=NUM_ACTIONS).to(device)
-    target_net = QNetwork(input_channels=3, num_actions=NUM_ACTIONS).to(device)
+    q_net = QNetwork((3, INPUT_SIZE[0], INPUT_SIZE[1]), NUM_ACTIONS).to(device)  
+    target_net = QNetwork((3, INPUT_SIZE[0], INPUT_SIZE[1]), NUM_ACTIONS).to(device)
     target_net.load_state_dict(q_net.state_dict())
     target_net.eval()
-    
-    # Enable optimizations
-    # if device.type == 'cuda':
-    #     q_net = q_net.half()
-    #     target_net = target_net.half()
-    
-    # Compile networks
-    # try:
-    #     q_net = torch.compile(q_net, mode='reduce-overhead')
-    #     target_net = torch.compile(target_net, mode='reduce-overhead')
-    #     print("✅ Networks compiled for optimization")
-    # except:
-    #     print("⚠️ Network compilation not available")
-    
-    optimizer = optim.AdamW(q_net.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
-    replay_buffer = SimpleReplayBuffer(REPLAY_BUFFER_CAPACITY)
 
+    optimizer = optim.Adam(q_net.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
+    replay_buffer, multi_step_buffer = initialize_enhanced_replay_system()
+    adaptive_trainer = AdaptiveTraining()
     epsilon = EPSILON_START
     step_idx = 0
 
     monitor = find_trackmania_window()
     print(f"🎮 Capturing Trackmania window at: {monitor}")
-
+    cumulative_rewards = []  # List to hold cumulative reward between crashes
     total_episodes = 300
     prev_mask = None
     
@@ -1189,7 +1363,9 @@ def main():
                 prev_car_pos = None
                 last_checkpoint_time = time.time()
                 last_checkpoint_reach_time = time.time()
+                cumulative_reward_since_crash = 0
                 
+                last_reward = 0
                 # FIXED: Initialize state variables for replay buffer
                 prev_state = None
                 prev_action = None
@@ -1198,7 +1374,7 @@ def main():
                 
                 while True:
                     current_time = time.time()
-                    time.sleep(0.1)
+                    time.sleep(0.15)
                     # Episode timeout check
                     if current_time - episode_start_time > EPISODE_TIMEOUT:
                         print("⏰ Episode timeout - ending episode")
@@ -1277,16 +1453,16 @@ def main():
                                 done = "finish" in events
                                 
                                 # Add experience to replay buffer
-                                replay_buffer.push(prev_state, prev_action, reward, state, done)
-                                
+                                store_experience_enhanced(replay_buffer, multi_step_buffer, prev_state, prev_action, reward, next_state, done, events)
                                 # Train the network
-                                if len(replay_buffer) > BATCH_SIZE and step_idx % TRAIN_FREQUENCY == 0:
-                                    loss = train_dqn(q_net, target_net, optimizer, replay_buffer)
-                                    if loss is not None and step_idx % 100 == 0:
-                                        print(f"📈 Training loss: {loss:.4f}")
+                                if adaptive_trainer.should_train(step_idx):
+                                    loss = train_step_prioritized(q_net, target_net, optimizer, replay_buffer)
+                                    adaptive_trainer.update_frequency(loss)
                         
                         # Update episode statistics
                         episode_reward += reward
+                        last_reward += reward
+                        cumulative_rewards.append(last_reward)
                         reward_history.append(reward)
                         
                         # Handle different events
@@ -1311,6 +1487,8 @@ def main():
                             finish_counter = 0
                             finish_confirmed = False
                             last_checkpoint_time = time.time()
+                            
+                            last_reward = 0
                             # Clear frame cache and wait a moment
                             prev_frame = None
                             prev_mask = None
@@ -1342,7 +1520,7 @@ def main():
                         
                         step_idx += 1
                         episode_length += 1
-
+                        
                     except Exception as e:
                         print(f"Frame processing error: {e}")
                         continue
@@ -1375,14 +1553,27 @@ def main():
             stop_control_thread_func()
             release_all_keys()
             
-            # Plot reward history
-            plt.figure(figsize=(10, 4))
-            plt.plot(reward_history, label="Reward per frame")
-            plt.xlabel("Timestep / Frame")
-            plt.ylabel("Reward")
-            plt.title("Reward over Time")
-            plt.grid(True)
-            plt.legend()
+
+            # Create a single figure with two subplots
+            fig, axs = plt.subplots(2, 1, figsize=(12, 8))
+
+            # Plot reward per frame
+            axs[0].plot(reward_history, label="Reward per frame")
+            axs[0].set_xlabel("Timestep / Frame")
+            axs[0].set_ylabel("Reward")
+            axs[0].set_title("Reward over Time")
+            axs[0].grid(True)
+            axs[0].legend()
+
+            # Plot cumulative rewards between crashes
+            axs[1].plot(cumulative_rewards, marker='o', label="Cumulative Reward (resets on crash)")
+            axs[1].set_xlabel("Crash Event Count")
+            axs[1].set_ylabel("Cumulative Reward")
+            axs[1].set_title("Cumulative Reward Between Crashes")
+            axs[1].grid(True)
+            axs[1].legend()
+
+            # Improve layout and show the plots
             plt.tight_layout()
             plt.show()
             safe_save_model(q_net.state_dict(), "trackmania_dqn_interrupted.pth")
