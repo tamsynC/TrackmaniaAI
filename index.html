@@ -278,6 +278,19 @@
             alt="Teaser."/>
         </div>
       </div>
+	  <div class="columns is-centered has-text-centered">
+        <div class="content">
+          <h2 class="title is-3"><br>Cumulative Rewards</h2>
+          <p>
+            Below shows the training decaying from too many punishments accumulating and the model giving up on learning. It also shows overfitting to short-term rewards.
+			(Top graph: rewards per step, Bottom Graph: Cumulative Rewards Per Crash)
+          </p>
+
+          <img src="./static/images/decaying.png"
+            class="teaser-image"
+            alt="Teaser."/>
+        </div>
+      </div>
     <!--/ Matting. -->
 
 
@@ -363,9 +376,38 @@
 		</div>
 	  </div>
 	</div>
+</section>
+
+<section class="section">
+  <div class="container is-max-desktop">
+
+    <div class="columns is-centered">
+      <div class="column is-full-width">
+        <h2 class="title is-3">CNN Segmentation Model</h2>
+
+        <div class="content has-text-justified">
+          <p>
+            The segmentation model used in this project is based on a U-Net architecture with a ResNet-34 encoder pretrained on ImageNet. This model is specifically designed for <strong>semantic segmentation</strong>, which involves assigning a class label to every pixel in an input image.
+          </p>
+
+          <p>
+            The training data consists of <strong>Trackmania gameplay frames</strong> annotated using the COCO format. The dataset includes four object classes in addition to a background class. A custom PyTorch <code>Dataset</code> class is used to load the dataset, which parses COCO annotations and converts them into binary masks corresponding to each object category.
+          </p>
+
+          <p>
+            Training is performed using the <code>cross-entropy loss</code> function and the <code>Adam optimizer</code> over the course of 50 epochs. During this process, the U-Net learns to map RGB input images to segmentation masks, effectively identifying key game elements.
+          </p>
+
+          <p>
+            The overlay shown in the segmented image demonstrates the model’s output superimposed on the original gameplay frame. This highlights the model's capability to accurately distinguish track surfaces, the car, and other visual game elements in real-time.
+          </p>
+        </div>
+      </div>
+    </div>
 
   </div>
 </section>
+
 
 
 <section class="section" id="BibTeX">
